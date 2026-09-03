@@ -5,8 +5,8 @@
 // Rust translation of `cdhit-2d.c++`.
 // =============================================================================
 
-use cdhit_core::cdhit_common::*;
-use cdhit_core::cdhit_utility::{current_time, print_usage_2d};
+use cdhit_rs::cdhit_common::*;
+use cdhit_rs::cdhit_utility::{current_time, print_usage_2d};
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
 fn main() {

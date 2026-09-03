@@ -18,8 +18,8 @@
 // =============================================================================
 //
 // Layout mirrors the C++: everything declared in `cdhit-common.h` comes first, then the
-// definitions from `cdhit-common.c++` in their original order. See `../../NAMING.md` for
-// the name mapping and the list of deliberate structural changes.
+// definitions from `cdhit-common.c++` in their original order. See `NAMING.md` at the
+// repository root for the name mapping and the list of deliberate structural changes.
 
 // This module is a line-by-line translation. Several lints fire on constructs that are
 // faithful transcriptions of the C++ and are deliberately left alone:

@@ -5,7 +5,7 @@
 #   BENCH_DNA=<dna.fna> BENCH_AA=<prot.faa> ./tests/bench.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CPP="${CPP_DIR:-$HERE/../../cdhit}"
+CPP="${CPP_DIR:-$HERE/../cdhit}"
 RS="${RS_DIR:-$HERE/../target/release}"
 DNA="${BENCH_DNA:-$HERE/data/dna_mixed.fna}"
 AA="${BENCH_AA:-$HERE/data/prot_mixed.faa}"

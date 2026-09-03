@@ -3,7 +3,7 @@
 # inputs and options, and require byte-identical .clstr and FASTA output.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CPP="${CPP_DIR:-$HERE/../../cdhit}"
+CPP="${CPP_DIR:-$HERE/../cdhit}"
 RS="${RS_DIR:-$HERE/../target/release}"
 DATA="$HERE/data"
 WORK="$(mktemp -d)"

@@ -5,8 +5,8 @@
 // Rust translation of `cdhit-div.c++`.
 // =============================================================================
 
-use cdhit_core::cdhit_common::*;
-use cdhit_core::cdhit_utility::{current_time, print_usage_div};
+use cdhit_rs::cdhit_common::*;
+use cdhit_rs::cdhit_utility::{current_time, print_usage_div};
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
 fn main() {

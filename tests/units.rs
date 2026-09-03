@@ -4,7 +4,7 @@
 //! The end-to-end check is `tests/difftest.sh`, which diffs real output against the C++
 //! binaries; these cover the corners that inputs rarely reach.
 
-use cdhit_core::cdhit_common::*;
+use cdhit_rs::cdhit_common::*;
 
 /// The C library's `atoi`: parse a leading integer, yield 0 when there isn't one.
 #[test]

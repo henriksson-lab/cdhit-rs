@@ -5,8 +5,8 @@
 // Rust translation of `cdhit-est-2d.c++`.
 // =============================================================================
 
-use cdhit_core::cdhit_common::*;
-use cdhit_core::cdhit_utility::{current_time, print_usage_est_2d};
+use cdhit_rs::cdhit_common::*;
+use cdhit_rs::cdhit_utility::{current_time, print_usage_est_2d};
 
 /// `#undef MAX_UAA` / `#define MAX_UAA 4`: nucleotide words are base 4, not base 21.
 const MAX_UAA_EST: i32 = 4;

@@ -1,0 +1,20 @@
+[package]
+name = "cdhit-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-2.0-or-later"
+description = "A Rust translation of CD-HIT 4.8.1"
+
+[dependencies]
+flate2 = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc = "0.2"
+
+# The six front-ends are picked up automatically from src/bin/.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
