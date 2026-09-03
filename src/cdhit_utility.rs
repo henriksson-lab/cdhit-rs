@@ -12,10 +12,21 @@
 use crate::cdhit_common::{build_date, CDHIT_VERSION};
 
 /// `current_time`: `((float)clock())/CLOCKS_PER_SEC`, i.e. CPU time consumed by the
-/// process so far, summed over threads.
+/// process so far, summed over threads. The clustering loops are threaded
+/// (`std::thread::scope` in `cdhit_common`), so this is deliberately not wall time: with
+/// `-T 8` it runs up to eight times ahead of the clock, exactly as upstream's `clock()`
+/// does on Linux.
 ///
-/// `libc` does not expose `clock()`, so this reads `CLOCK_PROCESS_CPUTIME_ID` directly;
-/// that is the clock `clock()` is specified to report.
+/// The clock is per-platform because no portable API reports process CPU time:
+///
+/// * Unix -- `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`, the clock C's `clock()` is
+///   specified to report. (`libc` does not re-export `clock()` itself.)
+/// * Windows -- `GetProcessTimes`, user + kernel time. The CRT's `clock()` measures wall
+///   time on Windows, so going through it would silently change what the number means.
+///   Declared by hand below rather than pulling in a Windows API crate for two calls.
+/// * Anything else -- wall time since the first call, which is what a single-threaded run
+///   would have printed anyway. See the fallback's own comment.
+#[cfg(unix)]
 pub fn current_time() -> f32 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -27,6 +38,76 @@ pub fn current_time() -> f32 {
         return 0.0;
     }
     ts.tv_sec as f32 + ts.tv_nsec as f32 / 1e9
+}
+
+/// The two `kernel32` entry points `current_time` needs on Windows. Hand-declared: their
+/// ABI has been fixed since Win32 shipped, and a whole Windows-bindings crate would be a
+/// heavy dependency for one call.
+#[cfg(windows)]
+mod win32 {
+    /// `FILETIME`: a 64-bit count of 100-nanosecond intervals, split across two `u32`s
+    /// because the struct predates guaranteed 8-byte alignment.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct Filetime {
+        pub low: u32,
+        pub high: u32,
+    }
+
+    impl Filetime {
+        /// Seconds, recombining the halves.
+        pub fn as_secs_f64(self) -> f64 {
+            (((self.high as u64) << 32) | self.low as u64) as f64 / 1e7
+        }
+    }
+
+    extern "system" {
+        /// Returns a pseudo-handle to the current process; needs no closing.
+        pub fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        /// Non-zero on success.
+        pub fn GetProcessTimes(
+            process: *mut core::ffi::c_void,
+            creation: *mut Filetime,
+            exit: *mut Filetime,
+            kernel: *mut Filetime,
+            user: *mut Filetime,
+        ) -> i32;
+    }
+}
+
+#[cfg(windows)]
+pub fn current_time() -> f32 {
+    let mut creation = win32::Filetime::default();
+    let mut exit = win32::Filetime::default();
+    let mut kernel = win32::Filetime::default();
+    let mut user = win32::Filetime::default();
+    // SAFETY: the pseudo-handle from `GetCurrentProcess` is always valid, and the four
+    // out-parameters are live, initialised `FILETIME`s for the duration of the call.
+    let ok = unsafe {
+        win32::GetProcessTimes(
+            win32::GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return 0.0;
+    }
+    (kernel.as_secs_f64() + user.as_secs_f64()) as f32
+}
+
+/// Fallback for targets that are neither Unix nor Windows (wasm, say). This is WALL time
+/// since the first call, not CPU time: the printed `Total CPU time` will read low for a
+/// threaded run and high for a run that spends its time blocked on I/O. Nothing portable
+/// reports process CPU time, and such targets cannot run the threaded path anyway.
+#[cfg(not(any(unix, windows)))]
+pub fn current_time() -> f32 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
 // information
@@ -58,10 +139,12 @@ pub const txt_option_i: &str = "\tinput filename in fasta format, required, can 
 pub const txt_option_j: &str = "\tinput filename in fasta/fastq format for R2 reads if input are paired end (PE) files\n \t -i R1.fq -j R2.fq -o output_R1 -op output_R2 or\n \t -i R1.fa -j R2.fa -o output_R1 -op output_R2 \n";
 
 /// `txt_option_i_2d`
-pub const txt_option_i_2d: &str = "\tinput filename for db1 in fasta format, required, can be in .gz format\n";
+pub const txt_option_i_2d: &str =
+    "\tinput filename for db1 in fasta format, required, can be in .gz format\n";
 
 /// `txt_option_i2`
-pub const txt_option_i2: &str = "\tinput filename for db2 in fasta format, required, can be in .gz format\n";
+pub const txt_option_i2: &str =
+    "\tinput filename for db2 in fasta format, required, can be in .gz format\n";
 
 /// `txt_option_j2`
 pub const txt_option_j2: &str = "\tinput filename in fasta/fastq format for R2 reads if input are paired end (PE) files\n \t -i db1-R1.fq -j db1-R2.fq -i2 db2-R1.fq -j2 db2-R2.fq -o output_R1 -op output_R2 or\n \t -i db1-R1.fa -j db1-R2.fa -i2 db2-R1.fq -j2 db2-R2.fq -o output_R1 -op output_R2 \n";
@@ -70,7 +153,8 @@ pub const txt_option_j2: &str = "\tinput filename in fasta/fastq format for R2 r
 pub const txt_option_o: &str = "\toutput filename, required\n";
 
 /// `txt_option_op`
-pub const txt_option_op: &str = "\toutput filename for R2 reads if input are paired end (PE) files\n";
+pub const txt_option_op: &str =
+    "\toutput filename for R2 reads if input are paired end (PE) files\n";
 
 /// `txt_option_c`
 pub const txt_option_c: &str = "\tsequence identity threshold, default 0.9\n \tthis is the default cd-hit's \"global sequence identity\" calculated as:\n \tnumber of identical amino acids or bases in alignment\n \tdivided by the full length of the shorter sequence\n";
@@ -85,7 +169,8 @@ pub const txt_option_g: &str = "\t1 or 0, default 0\n \tby cd-hit's default algo
 pub const txt_option_b: &str = "\tband_width of alignment, default 20\n";
 
 /// `txt_option_M`
-pub const txt_option_M: &str = "\tmemory limit (in MB) for the program, default 800; 0 for unlimitted;\n";
+pub const txt_option_M: &str =
+    "\tmemory limit (in MB) for the program, default 800; 0 for unlimitted;\n";
 
 /// `txt_option_n`
 pub const txt_option_n: &str = "\tword_length, default 5, see user's guide for choosing it\n";
@@ -157,7 +242,8 @@ pub const txt_option_uS: &str = "\tmaximum unmatched percentage for the shorter 
 pub const txt_option_U: &str = "\tmaximum unmatched length, default 99999999\n \tif set to 10, the unmatched region (excluding leading and tailing gaps)\n \tmust not be more than 10 bases\n";
 
 /// `txt_option_p`
-pub const txt_option_p: &str = "\t1 or 0, default 0\n \tif set to 1, print alignment overlap in .clstr file\n";
+pub const txt_option_p: &str =
+    "\t1 or 0, default 0\n \tif set to 1, print alignment overlap in .clstr file\n";
 
 /// `txt_option_r`
 pub const txt_option_r: &str = "\t1 or 0, default 1, by default do both +/+ & +/- alignments\n \tif set to 0, only +/+ strand alignment\n";
@@ -172,7 +258,8 @@ pub const txt_option_sc: &str = "\tsort clusters by size (number of sequences), 
 pub const txt_option_sf: &str = "\tsort fasta/fastq by cluster size (number of sequences), default 0, no sorting\n \tif set to 1, output sequences by decreasing cluster size\n \tthis can be very slow if the input is in .gz format\n";
 
 /// `txt_option_mask`
-pub const txt_option_mask: &str = "\tmasking letters (e.g. -mask NX, to mask out both 'N' and 'X')\n";
+pub const txt_option_mask: &str =
+    "\tmasking letters (e.g. -mask NX, to mask out both 'N' and 'X')\n";
 
 /// `txt_option_match`
 pub const txt_option_match: &str = "\tmatching score, default 2 (1 for T-U and N-N)\n";
@@ -202,7 +289,8 @@ pub const mytxt_option_c: &str = "\tsequence identity threshold, default 0.98\n 
 pub const mytxt_option_b: &str = "\tband_width of alignment, default 10\n";
 
 /// `mytxt_option_n_est`
-pub const mytxt_option_n_est: &str = "\tword_length, default 10, see user's guide for choosing it\n";
+pub const mytxt_option_n_est: &str =
+    "\tword_length, default 10, see user's guide for choosing it\n";
 
 /// `mytxt_option_D`
 pub const mytxt_option_D: &str = "\tmax size per indel, default 1\n";

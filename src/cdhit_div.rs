@@ -5,12 +5,11 @@
 // Rust translation of `cdhit-div.c++`.
 // =============================================================================
 
-use cdhit_rs::cdhit_common::*;
-use cdhit_rs::cdhit_utility::{current_time, print_usage_div};
+use crate::cdhit_common::*;
+use crate::cdhit_utility::{current_time, print_usage_div};
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
-fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+pub fn main(argv: &[String]) {
     let argc = argv.len();
 
     let mut options = Options::default();

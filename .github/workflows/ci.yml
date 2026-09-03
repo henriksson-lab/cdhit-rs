@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the run in flight pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Nothing is reused between CI runs except the cache, so incremental artefacts are
+  # never hit -- they would only bloat what the cache has to carry.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Build and test on the three platforms. The engine has an AVX-512 fast path behind
+  # `cfg(target_arch = "x86_64")` plus runtime feature detection, so macos-latest (arm64)
+  # is also the check that the scalar fallback still compiles and agrees.
+  build-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Caches ~/.cargo (registry, git checkouts) and ./target, keyed on the OS, the
+      # rustc version and Cargo.lock. Saves only on the default branch, so PRs cannot
+      # poison it.
+      - uses: Swatinem/rust-cache@v2
+
+      # The host triple decides which of the two code paths gets compiled; worth having
+      # in the log next to any failure.
+      - name: Toolchain and target
+        run: rustc -vV
+
+      # Per-OS, not once on Linux: clippy only sees the arms that its own host compiles,
+      # so the arm64 runner is what catches dead code in the scalar fallback and the
+      # Windows runner what catches it in the `GetProcessTimes` path. Running this only
+      # on Linux would have missed four warnings on aarch64.
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Debug profile on purpose: the unit tests cover C-style wrapping and overflow
+      # (`naa_powers_wrap_like_int`, `cvt_size_wraps_negative_like_a_c_size_t_cast`), and
+      # only a debug build has the overflow checks that would catch an accidental one.
+      - name: Test
+        run: cargo test --locked
+
+      # End-to-end proof that the release binary runs, and specifically that
+      # `current_time()` -- the one per-platform piece of the port -- returns a usable
+      # number on this OS. bash is present on all three runners, so one script serves all.
+      - name: Smoke-test the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '>a\nMKVLAAGIVGLLQPFAAWAQEDTNSA\n>b\nMKVLAAGIVGLLQPFAAWAQEDTNSA\n>c\nQQPTVWERTYHKLMNDCFGIPASVRE\n' > smoke.faa
+          cargo run --release --locked --quiet -- prot -i smoke.faa -o smoke.out -c 0.9 -n 5 | tee smoke.log
+          grep -q 'Total CPU time' smoke.log
+          test -s smoke.out.clstr
+
+  # Formatting is host-independent, and running it on a Windows checkout would only raise
+  # the CRLF question for no benefit -- so it stays on Linux alone. clippy is in the
+  # matrix above, because its findings are not host-independent.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+  # `rust-version` in Cargo.toml is a promise; this is the only thing that keeps it
+  # honest. The value is read from the manifest so the two cannot drift apart.
+  msrv:
+    name: minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          test -n "$version"
+          echo "Cargo.toml declares rust-version = $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The branch name is the action's default toolchain; the explicit input overrides
+      # it, which is how this action takes a version computed at run time.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `check`, not `build`: this job answers "does the declared MSRV compile it", and
+      # the matrix above already covers running it.
+      - name: Check
+        run: cargo check --all-targets --locked

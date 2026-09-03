@@ -21,27 +21,25 @@
 // definitions from `cdhit-common.c++` in their original order. See `NAMING.md` at the
 // repository root for the name mapping and the list of deliberate structural changes.
 
-// This module is a line-by-line translation. Several lints fire on constructs that are
-// faithful transcriptions of the C++ and are deliberately left alone:
+// This module is a line-by-line translation. Two lints fire on so many faithful
+// transcriptions of the C++ that suppressing them per item would be noise:
 //
-// - `mut_range_bound`: `for j in from..imax_diag { ... from += 1 }` mirrors
-//   `for (j=from; j<imax_diag; j++)`, where `from` is a separate variable and the bound is
-//   fixed. Same for `for ks in i..m { i = ks + 1; }` in `do_clustering`.
-// - `int_plus_one` / `manual_clamp` / `needless_range_loop` / `collapsible_if`: the C++
-//   spelling is kept so the two sources can be read side by side.
+// - `needless_range_loop` (13 sites): the C++ indexes with an explicit counter throughout,
+//   and several of the loops index two arrays at once or mutate the one they read.
+// - `too_many_arguments` (9 sites): the alignment and clustering routines take their
+//   results through `int &` out-parameters, which the port keeps as `&mut`.
+//
+// Every other suppression in this file is on the individual item, with the reason next to
+// it, so that a lint firing somewhere new is not silently absorbed.
+//
+// The `let _ = write!(...)` / `flush()` / `seek()` throughout discard an `io::Result`
+// because the corresponding `fprintf` / `fwrite` / `fflush` / `fseek` return values are
+// unchecked upstream; making the port bail where the original does not would change
+// behaviour. The `fread` results *are* checked -- upstream checks those.
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
-#![allow(clippy::mut_range_bound)]
-#![allow(clippy::int_plus_one)]
-#![allow(clippy::manual_clamp)]
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::if_same_then_else)]
-#![allow(clippy::needless_bool)]
-#![allow(clippy::large_enum_variant)]
-#![allow(clippy::four_forward_slashes)]
 
 use std::io::Write;
-
 
 // ===========================================================================
 // cdhit-common.h
@@ -372,6 +370,8 @@ pub struct WorkingBuffer {
     pub diag_score: Vec<u64>,
     pub aan_list_comp: Vec<i32>,
     pub seqi_comp: Vec<u8>,
+    /// Scratch for the vectorised nucleotide diagonal test (see `simd_diag`).
+    pub simd: SimdDiag,
     pub total_bytes: i32,
 }
 
@@ -440,8 +440,7 @@ pub const AA: &[u8; 23] = b"ARNDCQEGHILKMFPSTWYVBZX";
 ///          Q  R  S  T  U  V  W  X  Y  Z
 /// ```
 pub static AA2IDX: [i32; 26] = [
-       0,    2,    4,    3,    6,   13,    7,    8,    9,   20,   11,   10,   12,
-       2,   20,   14,    5,    1,   15,   16,   20,   19,   17,   20,   18,    6,
+    0, 2, 4, 3, 6, 13, 7, 8, 9, 20, 11, 10, 12, 2, 20, 14, 5, 1, 15, 16, 20, 19, 17, 20, 18, 6,
 ];
 
 /// `BLOSUM62`, the lower triangle in row-major order as `ScoreMatrix::set_matrix` reads it.
@@ -451,36 +450,23 @@ pub static AA2IDX: [i32; 26] = [
 /// 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19  2  6 20
 /// ```
 pub static BLOSUM62: [i32; 276] = [
-       4,   -1,    5,   -2,    0,    6,   -2,   -2,    1,    6,    0,   -3,
-      -3,   -3,    9,   -1,    1,    0,    0,   -3,    5,   -1,    0,    0,
-       2,   -4,    2,    5,    0,   -2,    0,   -1,   -3,   -2,   -2,    6,
-      -2,    0,    1,   -1,   -3,    0,    0,   -2,    8,   -1,   -3,   -3,
-      -3,   -1,   -3,   -3,   -4,   -3,    4,   -1,   -2,   -3,   -4,   -1,
-      -2,   -3,   -4,   -3,    2,    4,   -1,    2,    0,   -1,   -3,    1,
-       1,   -2,   -1,   -3,   -2,    5,   -1,   -1,   -2,   -3,   -1,    0,
-      -2,   -3,   -2,    1,    2,   -1,    5,   -2,   -3,   -3,   -3,   -2,
-      -3,   -3,   -3,   -1,    0,    0,   -3,    0,    6,   -1,   -2,   -2,
-      -1,   -3,   -1,   -1,   -2,   -2,   -3,   -3,   -1,   -2,   -4,    7,
-       1,   -1,    1,    0,   -1,    0,    0,    0,   -1,   -2,   -2,    0,
-      -1,   -2,   -1,    4,    0,   -1,    0,   -1,   -1,   -1,   -1,   -2,
-      -2,   -1,   -1,   -1,   -1,   -2,   -1,    1,    5,   -3,   -3,   -4,
-      -4,   -2,   -2,   -3,   -2,   -2,   -3,   -2,   -3,   -1,    1,   -4,
-      -3,   -2,   11,   -2,   -2,   -2,   -3,   -2,   -1,   -2,   -3,    2,
-      -1,   -1,   -2,   -1,    3,   -3,   -2,   -2,    2,    7,    0,   -3,
-      -3,   -3,   -1,   -2,   -2,   -3,   -3,    3,    1,   -2,    1,   -1,
-      -2,   -2,    0,   -3,   -1,    4,   -2,   -1,    3,    4,   -3,    0,
-       1,   -1,    0,   -3,   -4,    0,   -3,   -3,   -2,    0,   -1,   -4,
-      -3,   -3,    4,   -1,    0,    0,    1,   -3,    3,    4,   -2,    0,
-      -3,   -3,    1,   -1,   -3,   -1,    0,   -1,   -3,   -2,   -2,    1,
-       4,    0,   -1,   -1,   -1,   -2,   -1,   -1,   -1,   -1,   -1,   -1,
-      -1,   -1,   -1,   -2,    0,    0,   -2,   -1,   -1,   -1,   -1,   -1,
+    4, -1, 5, -2, 0, 6, -2, -2, 1, 6, 0, -3, -3, -3, 9, -1, 1, 0, 0, -3, 5, -1, 0, 0, 2, -4, 2, 5,
+    0, -2, 0, -1, -3, -2, -2, 6, -2, 0, 1, -1, -3, 0, 0, -2, 8, -1, -3, -3, -3, -1, -3, -3, -4, -3,
+    4, -1, -2, -3, -4, -1, -2, -3, -4, -3, 2, 4, -1, 2, 0, -1, -3, 1, 1, -2, -1, -3, -2, 5, -1, -1,
+    -2, -3, -1, 0, -2, -3, -2, 1, 2, -1, 5, -2, -3, -3, -3, -2, -3, -3, -3, -1, 0, 0, -3, 0, 6, -1,
+    -2, -2, -1, -3, -1, -1, -2, -2, -3, -3, -1, -2, -4, 7, 1, -1, 1, 0, -1, 0, 0, 0, -1, -2, -2, 0,
+    -1, -2, -1, 4, 0, -1, 0, -1, -1, -1, -1, -2, -2, -1, -1, -1, -1, -2, -1, 1, 5, -3, -3, -4, -4,
+    -2, -2, -3, -2, -2, -3, -2, -3, -1, 1, -4, -3, -2, 11, -2, -2, -2, -3, -2, -1, -2, -3, 2, -1,
+    -1, -2, -1, 3, -3, -2, -2, 2, 7, 0, -3, -3, -3, -1, -2, -2, -3, -3, 3, 1, -2, 1, -1, -2, -2, 0,
+    -3, -1, 4, -2, -1, 3, 4, -3, 0, 1, -1, 0, -3, -4, 0, -3, -3, -2, 0, -1, -4, -3, -3, 4, -1, 0,
+    0, 1, -3, 3, 4, -2, 0, -3, -3, 1, -1, -3, -1, 0, -1, -3, -2, -2, 1, 4, 0, -1, -1, -1, -2, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1,
 ];
 
 /// `na2idx`, the default nucleotide alphabet: A,C,G,T/U -> 0..=3, everything else -> 4.
 /// `-mask` rewrites the listed letters to 5.
 pub static NA2IDX: [i32; 26] = [
-       0,    4,    1,    4,    4,    4,    2,    4,    4,    4,    4,    4,    4,
-       4,    4,    4,    4,    4,    4,    3,    3,    4,    4,    4,    4,    4,
+    0, 4, 1, 4, 4, 4, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 4, 4, 4, 4, 4,
 ];
 
 /// `BLOSUM62_na`, the lower triangle of the nucleotide substitution matrix.
@@ -490,10 +476,8 @@ pub static NA2IDX: [i32; 26] = [
 /// 0  1  2  3  3  4  5
 /// ```
 pub static BLOSUM62_NA: [i32; 28] = [
-       2,   -2,    2,   -2,   -2,    2,   -2,
-      -2,   -2,    2,   -2,   -2,   -2,    1,
-       2,   -2,   -2,   -2,   -2,   -2,    1,
-       0,    0,    0,    0,    0,    0,    1,
+    2, -2, 2, -2, -2, 2, -2, -2, -2, 2, -2, -2, -2, 1, 2, -2, -2, -2, -2, -2, 1, 0, 0, 0, 0, 0, 0,
+    1,
 ];
 
 // ---------------------------------------------------------------------------
@@ -615,6 +599,48 @@ impl Default for Options {
             temp_dir: String::new(),
         }
     }
+}
+
+/// A C `(int)` cast of a floating value, as x86-64 actually performs it.
+///
+/// Converting a `double`/`float` whose truncated value does not fit in an `int` is
+/// undefined behaviour in C++, but every cast upstream compiles to `cvttsd2si` /
+/// `cvttss2si`, which returns the "integer indefinite" value `INT_MIN` (0x80000000) for
+/// out-of-range magnitudes and for NaN. Rust's `as i32` saturates instead, which is a
+/// *different* answer, and CD-HIT's own option handling walks straight into the
+/// difference: `-aS 99999999` makes `ControlShortCoverage` compute
+/// `(int)(len * 99999999.0)`, and upstream's `INT_MIN` is then immediately overwritten by
+/// `len - options.short_control`, whereas a saturated `INT_MAX` survives and rejects every
+/// alignment. Use this wherever the C++ writes `(int)` or `int(...)` on a floating value.
+#[inline]
+pub fn cvt_int(x: f64) -> i32 {
+    let t = x.trunc();
+    if t >= (i32::MIN as f64) && t <= (i32::MAX as f64) {
+        t as i32
+    } else {
+        i32::MIN
+    }
+}
+
+/// A C `(size_t)` / `(long)` cast of a floating value, as x86-64 actually performs it.
+///
+/// The 64-bit sibling of [`cvt_int`]: the compiler emits `cvttsd2si` into a 64-bit
+/// register and reinterprets the bits as unsigned, so a *negative* value becomes a huge
+/// `size_t` rather than saturating to `0` the way Rust's `as usize` does. That difference
+/// is load-bearing in `Options::ComputeTableLimits`, where the `int` expression
+/// `500*max_len + 500000*typical_len + 50000000` overflows to a negative number once the
+/// N50 passes ~4294 bases: upstream turns that into a `max_entries` of ~1.8e19, i.e. no
+/// limit at all, while a saturating cast would yield `0` and stall the block loop in
+/// `DoClustering` forever.
+#[inline]
+pub fn cvt_size(x: f64) -> usize {
+    let t = x.trunc();
+    let v = if t >= (i64::MIN as f64) && t <= (i64::MAX as f64) {
+        t as i64
+    } else {
+        i64::MIN // also covers NaN
+    };
+    v as usize
 }
 
 /// `atoi`: C semantics -- leading whitespace, optional sign, digits, and 0 on anything else.
@@ -752,6 +778,12 @@ impl Options {
     }
 
     /// `Options::SetOption`
+    // The trailing `else if ... return true; else return false;` chain is upstream's
+    // (`cdhit-common.c++`, `Options::SetOption`). The `-2d` and `-est` arms have identical
+    // bodies because the *conditions* differ, and the final `else return false` is what
+    // makes the chain fall through to the `return true` after it, so neither collapsing the
+    // arms nor reducing the tail to a bool expression would still read like the original.
+    #[allow(clippy::if_same_then_else, clippy::needless_bool)]
     pub fn set_option(
         &mut self,
         flag: &str,
@@ -971,12 +1003,15 @@ impl Options {
             bomb_error("invalid fragment size");
         }
 
-        let message = "Your word length is {}, using {} may be faster!";
-        let _ = message;
+        // COMPAT: upstream hoists the format string into
+        // `const char *message = "Your word length is %i, using %i may be faster!\n"`
+        // and passes it to every `printf` below (`cdhit-common.c++:403`). A Rust format
+        // string has to be a literal at each call site, so the text is repeated instead;
+        // there is no variable to keep.
         if !self.is_est && self.tolerance != 0 {
-            let clstr_idx = (self.cluster_thd * 100.0) as i32 - NAA_STAT_START_PERCENT;
-            let tcutoff =
-                NAA_STAT[(self.tolerance - 1) as usize][clstr_idx as usize][(5 - self.naa) as usize];
+            let clstr_idx = cvt_int(self.cluster_thd * 100.0) - NAA_STAT_START_PERCENT;
+            let tcutoff = NAA_STAT[(self.tolerance - 1) as usize][clstr_idx as usize]
+                [(5 - self.naa) as usize];
 
             if tcutoff < 5 {
                 bomb_error(
@@ -986,29 +1021,54 @@ impl Options {
             }
             let mut i = 5;
             while i > self.naa {
-                if NAA_STAT[(self.tolerance - 1) as usize][clstr_idx as usize][(5 - i) as usize] > 10
+                if NAA_STAT[(self.tolerance - 1) as usize][clstr_idx as usize][(5 - i) as usize]
+                    > 10
                 {
-                    println!("Your word length is {}, using {} may be faster!", self.naa, i);
+                    println!(
+                        "Your word length is {}, using {} may be faster!",
+                        self.naa, i
+                    );
                     break;
                 }
                 i -= 1;
             }
         } else if self.is_est {
             if self.cluster_thd > 0.9 && self.naa < 8 {
-                println!("Your word length is {}, using {} may be faster!", self.naa, 8);
+                println!(
+                    "Your word length is {}, using {} may be faster!",
+                    self.naa, 8
+                );
             } else if self.cluster_thd > 0.87 && self.naa < 5 {
-                println!("Your word length is {}, using {} may be faster!", self.naa, 5);
+                println!(
+                    "Your word length is {}, using {} may be faster!",
+                    self.naa, 5
+                );
             } else if self.cluster_thd > 0.80 && self.naa < 4 {
-                println!("Your word length is {}, using {} may be faster!", self.naa, 4);
+                println!(
+                    "Your word length is {}, using {} may be faster!",
+                    self.naa, 4
+                );
             } else if self.cluster_thd > 0.75 && self.naa < 3 {
-                println!("Your word length is {}, using {} may be faster!", self.naa, 3);
+                println!(
+                    "Your word length is {}, using {} may be faster!",
+                    self.naa, 3
+                );
             }
         } else if self.cluster_thd > 0.85 && self.naa < 5 {
-            println!("Your word length is {}, using {} may be faster!", self.naa, 5);
+            println!(
+                "Your word length is {}, using {} may be faster!",
+                self.naa, 5
+            );
         } else if self.cluster_thd > 0.80 && self.naa < 4 {
-            println!("Your word length is {}, using {} may be faster!", self.naa, 4);
+            println!(
+                "Your word length is {}, using {} may be faster!",
+                self.naa, 4
+            );
         } else if self.cluster_thd > 0.75 && self.naa < 3 {
-            println!("Your word length is {}, using {} may be faster!", self.naa, 3);
+            println!(
+                "Your word length is {}, using {} may be faster!",
+                self.naa, 3
+            );
         }
 
         if (self.min_length + 1) < self.naa {
@@ -1056,7 +1116,10 @@ pub fn bomb_error2(message: &str, message2: &str) -> ! {
 
 /// `bomb_warning`
 pub fn bomb_warning(message: &str) {
-    eprintln!("\nWarning:\n{}\nNot fatal, but may affect results !!\n", message);
+    eprintln!(
+        "\nWarning:\n{}\nNot fatal, but may affect results !!\n",
+        message
+    );
 }
 
 /// `bomb_warning( const char*, const char* )`
@@ -1118,6 +1181,9 @@ fn unpack_diag(v: u64) -> (i32, i32) {
 ///
 /// `buffer.taap` / `aap_begin` / `aap_list` must already describe seq1's dipeptides, i.e.
 /// [`WorkingBuffer::compute_aap`] must have been called for the query.
+// The `////` banner above is upstream's own spelling (`cdhit-common.c++:501`), transcribed
+// as-is; it is a plain comment there and here, not a doc comment.
+#[allow(clippy::four_forward_slashes)]
 pub fn diag_test_aapn(
     naa1: i32,
     iseq2: &[u8],
@@ -1144,7 +1210,14 @@ pub fn diag_test_aapn(
 
     //find the best band range
     //  int band_b = required_aa1;
-    let band_b = if required_aa1 - 1 >= 0 { required_aa1 - 1 } else { 0 }; // on dec 21 2001
+    // `required_aa1-1 >= 0` is the upstream spelling (`cdhit-common.c++:551`), kept
+    // verbatim next to upstream's own commented-out alternative.
+    #[allow(clippy::int_plus_one)]
+    let band_b = if required_aa1 - 1 >= 0 {
+        required_aa1 - 1
+    } else {
+        0
+    }; // on dec 21 2001
     let band_e = nall - band_b;
 
     // Upstream clears all `nall` diagonals before counting. Only `[band_b, band_e]` is ever
@@ -1242,8 +1315,16 @@ pub fn diag_test_aapn(
         j += 1;
         k += 1;
     }
-    let mlen = if imax_diag > len1 { nall - imax_diag } else { imax_diag };
-    let emax = ((1.0 - options.cluster_thd) * mlen as f64) as i32 + 1;
+    let mlen = if imax_diag > len1 {
+        nall - imax_diag
+    } else {
+        imax_diag
+    };
+    let emax = cvt_int((1.0 - options.cluster_thd) * mlen as f64) + 1;
+    // `from` is upstream's own loop-independent accumulator: `for (j=from; j<imax_diag; j++)`
+    // reads `from` once to seed `j` and then only increments it. Mutating it here does not
+    // move the bound, exactly as in the C++.
+    #[allow(clippy::mut_range_bound)]
     for j in from..imax_diag {
         // if aap pairs fail to open gap
         if (imax_diag - j) > emax || unpack_diag(ds[j as usize]).0 < 1 {
@@ -1273,6 +1354,305 @@ pub fn diag_test_aapn(
 }
 // END diag_test_aapn
 
+/// Scratch for the vectorised form of the nucleotide diagonal test.
+///
+/// The scalar loop walks the representative's 4-mers, looks each one up in an index of the
+/// query, and scatters an increment onto the diagonal each hit lies on. That is a
+/// dependent, branchy read-modify-write per hit, and at low identity thresholds it is
+/// almost the entire program.
+///
+/// The same two counters can be computed transposed instead: for a diagonal offset `o`,
+/// `cnt[o]` is the number of query positions `b` where the query's 4-mer equals the
+/// representative's at `b + o`, and `cpx[o]` sums the complexity weight over those. That
+/// vectorises across `o` -- compare one broadcast query code against 64 representative
+/// codes at a time -- with no scatter and no data-dependent branch.
+///
+/// Two details make it exact rather than approximate:
+///
+/// * The weight is computed upstream from the *representative's* 4-mer, but it is only
+///   ever added when the two 4-mers are equal, so it equals the *query's* weight. That
+///   turns it into a per-`b` scalar, which is what allows grouping by weight below.
+/// * A 4-mer packs into a byte as `q0<<6 | q1<<4 | q2<<2 | q3`, and `TTTT` is `0xFF` --
+///   the same value used to mark positions containing `N`. Hence two copies of the
+///   representative: `ra` marks skipped positions `0xFF` and serves every query code
+///   except `TTTT`, and `rb` marks them `0x00` and serves `TTTT`.
+// Everything below is only reachable through the x86_64 kernel; on other targets
+// `simd_diag_count` declines before touching any of it.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[derive(Default)]
+pub struct SimdDiag {
+    /// Query positions grouped by complexity weight 1..=4, and their packed 4-mer codes.
+    grp_b: [Vec<u32>; 5],
+    grp_c: [Vec<u8>; 5],
+    /// The representative's packed codes, padded, in the two sentinel flavours.
+    ra: Vec<u8>,
+    rb: Vec<u8>,
+    /// Per-diagonal accumulators, indexed from `band_b`.
+    cnt: Vec<u16>,
+    cpx: Vec<u16>,
+}
+
+/// Longest query the `u16` accumulators can take: `cpx` adds up to 4 per matching position.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+const SIMD_DIAG_MAX_LEN1: i32 = 16383;
+
+/// Whether this CPU has the instructions the kernel needs. Probed once.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn simd_diag_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::sync::OnceLock;
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| {
+            is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw")
+        })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+impl SimdDiag {
+    /// Group the query's 4-mer codes by complexity weight. Called once per query strand,
+    /// from `compute_aap2`, so it costs nothing per candidate.
+    fn prepare_query(&mut self, seqi: &[u8], size: i32) {
+        for v in 0..5 {
+            self.grp_b[v].clear();
+            self.grp_c[v].clear();
+        }
+        let nq = size - 3;
+        if nq <= 0 {
+            return;
+        }
+        for b in 0..nq as usize {
+            let c0 = seqi[b];
+            let c1 = seqi[b + 1];
+            let c2 = seqi[b + 2];
+            let c3 = seqi[b + 3];
+            if (c0 | c1 | c2 | c3) >= 4 {
+                continue; // the scalar loop skips these too
+            }
+            let code = (c0 << 6) | (c1 << 4) | (c2 << 2) | c3;
+            let w = 1 + (c0 != c1) as usize + (c1 != c2) as usize + (c2 != c3) as usize;
+            self.grp_b[w].push(b as u32);
+            self.grp_c[w].push(code);
+        }
+    }
+}
+
+/// The kernel: for each query position in one weight group, compare its broadcast 4-mer
+/// code against `NT * 64` representative codes and accumulate matches per diagonal.
+///
+/// Accumulators are 8-bit and flushed to the 16-bit totals every 255 positions, which is
+/// what keeps the inner loop to one compare and one masked add per 64 diagonals.
+///
+/// # Safety
+/// `ra`/`rb` must be readable for `porg + b + o0 + NT*64 + 64` bytes for every `b` in the
+/// groups, and `cnt`/`cpx` must hold at least `NT * 64` elements. `prepare_rep` and
+/// `simd_diag_count` together establish both.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn simd_diag_kernel<const NT: usize>(
+    simd: &SimdDiag,
+    ra: *const u8,
+    rb: *const u8,
+    porg: isize,
+    o0: isize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    use core::arch::x86_64::*;
+    // Without the barrier LLVM rewrites the masked add into `vpmovm2b` + `vpsubb`, two
+    // uops where one will do; this loop is issue-bound, so that costs ~15%.
+    let ones = std::hint::black_box(_mm512_set1_epi8(1));
+    for w in 1..5usize {
+        let bs = &simd.grp_b[w];
+        let cs = &simd.grp_c[w];
+        let nb = bs.len();
+        let wv = _mm512_set1_epi16(w as i16);
+        let mut i = 0usize;
+        while i < nb {
+            let stop = (i + 255).min(nb);
+            let mut acc = [_mm512_setzero_si512(); NT];
+            while i < stop {
+                let qc = *cs.get_unchecked(i);
+                let b = *bs.get_unchecked(i) as isize;
+                // `TTTT` packs to 0xFF, the same byte that marks a skipped position, so it
+                // reads the copy where skipped positions are 0x00 instead.
+                let base = if qc == 0xFF { rb } else { ra };
+                let p = base.offset(porg + b + o0);
+                let qv = _mm512_set1_epi8(qc as i8);
+                for (t, a) in acc.iter_mut().enumerate() {
+                    let rv = _mm512_loadu_si512(p.add(t * 64) as *const __m512i);
+                    let k = _mm512_cmpeq_epi8_mask(qv, rv);
+                    *a = _mm512_mask_add_epi8(*a, k, *a, ones);
+                }
+                i += 1;
+            }
+            for (t, a) in acc.iter().enumerate() {
+                let lo = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(*a));
+                let hi = _mm512_cvtepu8_epi16(_mm512_extracti64x4_epi64(*a, 1));
+                let cp = cnt.add(t * 64);
+                let pp = cpx.add(t * 64);
+                let c0 = _mm512_loadu_si512(cp as *const __m512i);
+                let c1 = _mm512_loadu_si512(cp.add(32) as *const __m512i);
+                _mm512_storeu_si512(cp as *mut __m512i, _mm512_add_epi16(c0, lo));
+                _mm512_storeu_si512(cp.add(32) as *mut __m512i, _mm512_add_epi16(c1, hi));
+                let q0 = _mm512_loadu_si512(pp as *const __m512i);
+                let q1 = _mm512_loadu_si512(pp.add(32) as *const __m512i);
+                _mm512_storeu_si512(
+                    pp as *mut __m512i,
+                    _mm512_add_epi16(q0, _mm512_mullo_epi16(lo, wv)),
+                );
+                _mm512_storeu_si512(
+                    pp.add(32) as *mut __m512i,
+                    _mm512_add_epi16(q1, _mm512_mullo_epi16(hi, wv)),
+                );
+            }
+        }
+    }
+}
+
+/// Pick the unrolled kernel for `span`, chunking when the span exceeds the widest one.
+///
+/// # Safety
+/// As [`simd_diag_kernel`].
+#[cfg(target_arch = "x86_64")]
+unsafe fn simd_diag_dispatch(
+    simd: &SimdDiag,
+    ra: *const u8,
+    rb: *const u8,
+    porg: isize,
+    o0: isize,
+    span: usize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    macro_rules! call {
+        ($($n:literal),*) => {
+            match span.div_ceil(64) {
+                $( $n => return simd_diag_kernel::<$n>(simd, ra, rb, porg, o0, cnt, cpx), )*
+                _ => {}
+            }
+        };
+    }
+    call!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+    let mut done = 0usize;
+    while done < span {
+        let take = (span - done).min(16 * 64);
+        simd_diag_dispatch(
+            simd,
+            ra,
+            rb,
+            porg,
+            o0 + done as isize,
+            take,
+            cnt.add(done),
+            cpx.add(done),
+        );
+        done += take;
+    }
+}
+
+/// Fill `diag_score[band_b ..= band_e]` with the same packed counters the scalar loop in
+/// `diag_test_aapn_est` would produce, using the vectorised kernel. Returns `false` when
+/// it declines, in which case the caller must run the scalar loop.
+///
+/// Only the *counting* is replaced; everything downstream -- the band scan, the trimming,
+/// `best_sum` -- reads `diag_score` exactly as before.
+fn simd_diag_count(
+    simd: &mut SimdDiag,
+    diag_score: &mut [u64],
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    band_b: i32,
+    band_e: i32,
+) -> bool {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Not a translation artefact: the vectorised counter is an addition to the port,
+        // and off x86-64 there is no kernel to dispatch to, so every argument is unused.
+        // Declining here makes the caller run the scalar loop, which is the only path the
+        // C++ has.
+        let _ = (simd, diag_score, iseq2, len1, len2, band_b, band_e);
+        false
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // `cnt` can reach `len1` and `cpx` four times that; both are u16.
+        if len1 > SIMD_DIAG_MAX_LEN1 || !simd_diag_supported() {
+            return false;
+        }
+        if band_b > band_e || len2 < 4 || len1 < 4 {
+            return false;
+        }
+        let nr = (len2 - 3) as usize;
+        let nq = (len1 - 3) as usize;
+        let span = (band_e - band_b + 1) as usize;
+        let o0 = band_b as isize - len1 as isize + 1;
+
+        // Lay the representative's codes out with enough slack that every read the kernel
+        // makes -- `porg + b + o0 + t*64 + 63` for `b < nq` and `t*64 < span + 64` -- lands
+        // inside the buffer, whatever sign `o0` has.
+        let porg = nq + 64 + o0.unsigned_abs();
+        let total = porg + nr + span + nq + 128;
+        if simd.ra.len() < total {
+            simd.ra.resize(total, 0xFF);
+            simd.rb.resize(total, 0x00);
+        }
+        simd.ra[..total].fill(0xFF);
+        simd.rb[..total].fill(0x00);
+        for j in 0..nr {
+            let c0 = iseq2[j];
+            let c1 = iseq2[j + 1];
+            let c2 = iseq2[j + 2];
+            let c3 = iseq2[j + 3];
+            if (c0 | c1 | c2 | c3) >= 4 {
+                continue; // skip N, exactly as the scalar loop does
+            }
+            let code = (c0 << 6) | (c1 << 4) | (c2 << 2) | c3;
+            simd.ra[porg + j] = code;
+            simd.rb[porg + j] = code;
+        }
+
+        let acc = span + 128;
+        if simd.cnt.len() < acc {
+            simd.cnt.resize(acc, 0);
+            simd.cpx.resize(acc, 0);
+        }
+        simd.cnt[..acc].fill(0);
+        simd.cpx[..acc].fill(0);
+
+        // Take the accumulators out so the kernel can hold `&SimdDiag` and `&mut` output
+        // at the same time; they go straight back.
+        let mut cnt = std::mem::take(&mut simd.cnt);
+        let mut cpx = std::mem::take(&mut simd.cpx);
+        // SAFETY: `ra`/`rb` are `total` bytes and the padding above covers every offset the
+        // kernel forms; `cnt`/`cpx` hold `span + 128` elements, at least `NT * 64`.
+        unsafe {
+            simd_diag_dispatch(
+                simd,
+                simd.ra.as_ptr(),
+                simd.rb.as_ptr(),
+                porg as isize,
+                o0,
+                span,
+                cnt.as_mut_ptr(),
+                cpx.as_mut_ptr(),
+            );
+        }
+
+        for i in 0..span {
+            diag_score[band_b as usize + i] = cnt[i] as u64 | ((cpx[i] as u64) << 32);
+        }
+        simd.cnt = cnt;
+        simd.cpx = cpx;
+        true
+    }
+}
+
 /// `diag_test_aapn_est`
 ///
 /// `buffer.taap` / `aap_begin` / `aap_list` must already describe seq1's 4-mers, i.e.
@@ -1294,18 +1674,19 @@ pub fn diag_test_aapn_est(
     let nall = len1 + len2 - 1;
     let naa2 = naa1 * naa1;
     let naa3 = naa2 * naa1;
-    let taap = &buffer.taap;
-    let aap_begin = &buffer.aap_begin;
-    let aap_list = &buffer.aap_list;
-    let diag_score = &mut buffer.diag_score;
-
-    if nall as usize > diag_score.len() {
+    if nall as usize > buffer.diag_score.len() {
         bomb_error("in diag_test_aapn_est, MAX_DIAG reached");
     }
 
     //find the best band range
     //  int band_b = required_aa1;
-    let mut band_b = if required_aa1 - 1 >= 0 { required_aa1 - 1 } else { 0 }; // on dec 21 2001
+    // As in `diag_test_aapn`: upstream's spelling (`cdhit-common.c++:666`).
+    #[allow(clippy::int_plus_one)]
+    let mut band_b = if required_aa1 - 1 >= 0 {
+        required_aa1 - 1
+    } else {
+        0
+    }; // on dec 21 2001
     let mut band_e = nall - band_b;
 
     if options.is_454 {
@@ -1325,53 +1706,75 @@ pub fn diag_test_aapn_est(
     // representative becomes a candidate, is most of the work this function does. Counts
     // that land outside the range are written and never read; the next call clears whatever
     // part of the array it is going to read.
-    if band_b <= band_e {
-        diag_score[band_b as usize..=band_e as usize].fill(0);
-    }
+    // Counting is the expensive half. The vectorised form computes the same two counters
+    // for every diagonal in `[band_b, band_e]` -- the only range anything downstream reads
+    // -- so when it runs the scalar loop is skipped and everything after this point is
+    // unchanged. It declines on non-AVX-512 hardware, and on queries long enough to
+    // overflow its 16-bit accumulators.
+    let simd_done = simd_diag_count(
+        &mut buffer.simd,
+        &mut buffer.diag_score,
+        iseq2,
+        len1,
+        len2,
+        band_b,
+        band_e,
+    );
 
-    let mut i1 = len1 - 1;
-    for w in iseq2[..len2 as usize].windows(4) {
-        // Read the 4-mer as one 32-bit word. Bases are 0..=3, N is 4 and the mask code is
-        // 5, so a byte to skip is exactly one with a bit above the low two set: one mask
-        // and one test replaces four comparisons.
-        let word = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
-        if word & 0xfcfc_fcfc != 0 {
-            i1 += 1;
-            continue; //skip N
-        }
-        let c0 = (word & 0xff) as i32;
-        let c1 = ((word >> 8) & 0xff) as i32;
-        let c2 = ((word >> 16) & 0xff) as i32;
-        let c3 = (word >> 24) as i32;
+    let taap = &buffer.taap;
+    let aap_begin = &buffer.aap_begin;
+    let aap_list = &buffer.aap_list;
+    let diag_score = &mut buffer.diag_score;
 
-        let c22 = (c0 * naa3 + c1 * naa2 + c2 * naa1 + c3) as usize;
-        debug_assert!(c22 < taap.len() && c22 < aap_begin.len());
-        // SAFETY: each base is < naa1, so `c22 < naa1^4`, and `WorkingBuffer::set` sizes
-        // both arrays to `MAX_UAA^4` (194481), comfortably above the nucleotide 4^4 = 256.
-        let j = unsafe { *taap.get_unchecked(c22) };
-        if j == 0 {
+    if !simd_done {
+        if band_b <= band_e {
+            diag_score[band_b as usize..=band_e as usize].fill(0);
+        }
+
+        let mut i1 = len1 - 1;
+        for w in iseq2[..len2 as usize].windows(4) {
+            // Read the 4-mer as one 32-bit word. Bases are 0..=3, N is 4 and the mask code is
+            // 5, so a byte to skip is exactly one with a bit above the low two set: one mask
+            // and one test replaces four comparisons.
+            let word = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+            if word & 0xfcfc_fcfc != 0 {
+                i1 += 1;
+                continue; //skip N
+            }
+            let c0 = (word & 0xff) as i32;
+            let c1 = ((word >> 8) & 0xff) as i32;
+            let c2 = ((word >> 16) & 0xff) as i32;
+            let c3 = (word >> 24) as i32;
+
+            let c22 = (c0 * naa3 + c1 * naa2 + c2 * naa1 + c3) as usize;
+            debug_assert!(c22 < taap.len() && c22 < aap_begin.len());
+            // SAFETY: each base is < naa1, so `c22 < naa1^4`, and `WorkingBuffer::set` sizes
+            // both arrays to `MAX_UAA^4` (194481), comfortably above the nucleotide 4^4 = 256.
+            let j = unsafe { *taap.get_unchecked(c22) };
+            if j == 0 {
+                i1 += 1;
+                continue;
+            }
+            let cpx = 1 + (c0 != c1) as i32 + (c1 != c2) as i32 + (c2 != c3) as i32;
+            let step = 1u64 | ((cpx as u64) << 32);
+            // SAFETY: as above.
+            let m = unsafe { *aap_begin.get_unchecked(c22) } as usize;
+            // SAFETY: `compute_aap`/`compute_aap2` fill `aap_list` so that
+            // `aap_begin[c22] + taap[c22]` never exceeds the number of words in seq1, which is
+            // at most `aap_list.len()`.
+            debug_assert!(m + j as usize <= aap_list.len());
+            for &b in unsafe { aap_list.get_unchecked(m..m + j as usize) } {
+                let d = (i1 - b as i32) as usize;
+                debug_assert!(d < nall as usize);
+                // SAFETY: `aap_list` holds positions in seq1, so `0 <= b <= len1 - 4`, and
+                // `len1 - 1 <= i1 <= len1 + len2 - 5`. Hence `3 <= d <= len1 + len2 - 5 < nall`,
+                // and the array was just sized and zeroed to `nall`. Nearly all of the run time
+                // at low identity thresholds is in this loop.
+                unsafe { *diag_score.get_unchecked_mut(d) += step };
+            }
             i1 += 1;
-            continue;
         }
-        let cpx = 1 + (c0 != c1) as i32 + (c1 != c2) as i32 + (c2 != c3) as i32;
-        let step = 1u64 | ((cpx as u64) << 32);
-        // SAFETY: as above.
-        let m = unsafe { *aap_begin.get_unchecked(c22) } as usize;
-        // SAFETY: `compute_aap`/`compute_aap2` fill `aap_list` so that
-        // `aap_begin[c22] + taap[c22]` never exceeds the number of words in seq1, which is
-        // at most `aap_list.len()`.
-        debug_assert!(m + j as usize <= aap_list.len());
-        for &b in unsafe { aap_list.get_unchecked(m..m + j as usize) } {
-            let d = (i1 - b as i32) as usize;
-            debug_assert!(d < nall as usize);
-            // SAFETY: `aap_list` holds positions in seq1, so `0 <= b <= len1 - 4`, and
-            // `len1 - 1 <= i1 <= len1 + len2 - 5`. Hence `3 <= d <= len1 + len2 - 5 < nall`,
-            // and the array was just sized and zeroed to `nall`. Nearly all of the run time
-            // at low identity thresholds is in this loop.
-            unsafe { *diag_score.get_unchecked_mut(d) += step };
-        }
-        i1 += 1;
-    }
+    } // end !simd_done
 
     let band_m = if band_b + band_width - 1 < band_e {
         band_b + band_width - 1
@@ -1427,8 +1830,16 @@ pub fn diag_test_aapn_est(
         j += 1;
         k += 1;
     }
-    let mlen = if imax_diag > len1 { nall - imax_diag } else { imax_diag };
-    let emax = ((1.0 - options.cluster_thd) * mlen as f64) as i32 + 1;
+    let mlen = if imax_diag > len1 {
+        nall - imax_diag
+    } else {
+        imax_diag
+    };
+    let emax = cvt_int((1.0 - options.cluster_thd) * mlen as f64) + 1;
+    // `from` is upstream's own loop-independent accumulator: `for (j=from; j<imax_diag; j++)`
+    // reads `from` once to seed `j` and then only increments it. Mutating it here does not
+    // move the bound, exactly as in the C++.
+    #[allow(clippy::mut_range_bound)]
     for j in from..imax_diag {
         // if aap pairs fail to open gap
         if (imax_diag - j) > emax || unpack_diag(ds[j as usize]).0 < 1 {
@@ -1537,24 +1948,24 @@ pub fn local_band_align(
 
     *best_score = 0;
     /* seq1 is query, seq2 is rep
-                  seq2    len2 = 17       seq2    len2 = 17    seq2    len2 = 17
-                  01234567890123456       01234567890123456    01234567890123456
-       0          xxxxxxxxxxxxxxxxx \\\\\\XXXxxxxxxxxxxxxxx    xXXXXXXXxxxxxxxxx
-       1     \\\\\Xxxxxxxxxxxxxxxxx  \\\\\Xxx\xxxxxxxxxxxxx    xx\xxxxx\xxxxxxxx
-       2      \\\\X\xxxxxxxxxxxxxxx   \\\\Xxxx\xxxxxxxxxxxx    xxx\xxxxx\xxxxxxx
-  seq1 3       \\\Xx\xxxxxxxxxxxxxx    \\\Xxxxx\xxxxxxxxxxx    xxxx\xxxxx\xxxxxx
-  len1 4        \\Xxx\xxxxxxxxxxxxx     \\Xxxxxx\xxxxxxxxxx    xxxxx\xxxxx\xxxxx
-  = 11 5         \Xxxx\xxxxxxxxxxxx      \Xxxxxxx\xxxxxxxxx    xxxxxx\xxxxx\xxxx
-       6          Xxxxx\xxxxxxxxxxx       Xxxxxxxx\xxxxxxxx    xxxxxxx\xxxxx\xxx
-       7          x\xxxx\xxxxxxxxxx       x\xxxxxxx\xxxxxxx    xxxxxxxx\xxxxx\xx
-       8          xx\xxxx\xxxxxxxxx       xx\xxxxxxx\xxxxxx    xxxxxxxxx\xxxxx\x
-       9          xxx\xxxx\xxxxxxxx       xxx\xxxxxxx\xxxxx    xxxxxxxxxx\xxxxx\
-       0          xxxx\xxxx\xxxxxxx       xxxx\xxxxxxx\xxxx    xxxxxxxxxxx\xxxxx
-                  band_left < 0 (-6)      band_left < 0 (-6)   band_left >=0 (1)
-                  band_right < 0 (-1)     band_right >=0 (2)   band_right >=0(7)
-                  band_width 6            band_width 9         band_width 7
-       init score_mat, and iden_mat (place with upper 'X')
-     */
+                    seq2    len2 = 17       seq2    len2 = 17    seq2    len2 = 17
+                    01234567890123456       01234567890123456    01234567890123456
+         0          xxxxxxxxxxxxxxxxx \\\\\\XXXxxxxxxxxxxxxxx    xXXXXXXXxxxxxxxxx
+         1     \\\\\Xxxxxxxxxxxxxxxxx  \\\\\Xxx\xxxxxxxxxxxxx    xx\xxxxx\xxxxxxxx
+         2      \\\\X\xxxxxxxxxxxxxxx   \\\\Xxxx\xxxxxxxxxxxx    xxx\xxxxx\xxxxxxx
+    seq1 3       \\\Xx\xxxxxxxxxxxxxx    \\\Xxxxx\xxxxxxxxxxx    xxxx\xxxxx\xxxxxx
+    len1 4        \\Xxx\xxxxxxxxxxxxx     \\Xxxxxx\xxxxxxxxxx    xxxxx\xxxxx\xxxxx
+    = 11 5         \Xxxx\xxxxxxxxxxxx      \Xxxxxxx\xxxxxxxxx    xxxxxx\xxxxx\xxxx
+         6          Xxxxx\xxxxxxxxxxx       Xxxxxxxx\xxxxxxxx    xxxxxxx\xxxxx\xxx
+         7          x\xxxx\xxxxxxxxxx       x\xxxxxxx\xxxxxxx    xxxxxxxx\xxxxx\xx
+         8          xx\xxxx\xxxxxxxxx       xx\xxxxxxx\xxxxxx    xxxxxxxxx\xxxxx\x
+         9          xxx\xxxx\xxxxxxxx       xxx\xxxxxxx\xxxxx    xxxxxxxxxx\xxxxx\
+         0          xxxx\xxxx\xxxxxxx       xxxx\xxxxxxx\xxxx    xxxxxxxxxxx\xxxxx
+                    band_left < 0 (-6)      band_left < 0 (-6)   band_left >=0 (1)
+                    band_right < 0 (-1)     band_right >=0 (2)   band_right >=0(7)
+                    band_width 6            band_width 9         band_width 7
+         init score_mat, and iden_mat (place with upper 'X')
+       */
 
     if band_left < 0 {
         //set score to left border of the matrix within band
@@ -2119,7 +2530,10 @@ impl WordTable {
                 let k1 = word_encodes_no[i1 as usize];
                 if k1 != 0 {
                     let j = word_encodes[i1 as usize];
-                    self.push_entry(j as usize, IndexCount::new(self.frag_count + fra, k1 as i32));
+                    self.push_entry(
+                        j as usize,
+                        IndexCount::new(self.frag_count + fra, k1 as i32),
+                    );
                     self.size += 1;
                 }
             }
@@ -2333,7 +2747,11 @@ impl Clone for Sequence {
         Sequence {
             data: self.data.clone(),
             size: self.size,
-            size_r2: if self.data.is_empty() { self.size_r2 } else { 0 },
+            size_r2: if self.data.is_empty() {
+                self.size_r2
+            } else {
+                0
+            },
             swap: self.swap,
             offset: self.offset,
             des_begin: self.des_begin,
@@ -2599,6 +3017,9 @@ impl<R: std::io::Read> LineReader<R> {
 /// Plain files seek directly. Gzip streams cannot seek backwards, so a backward seek
 /// restarts decompression from the beginning -- which is what `gzseek` does internally,
 /// and why the `-sf` help text warns that it is slow on `.gz` input.
+// Boxing the gzip arm would move the decoder to the heap to save stack on the plain-file
+// arm, but exactly one of these is constructed per output file, so the saving is nil.
+#[allow(clippy::large_enum_variant)]
 enum RecordSource {
     Plain(std::fs::File),
     Gz {
@@ -2668,11 +3089,7 @@ impl std::io::Read for RecordSource {
 
 /// The body of `WriteClusters`: for each selected record, seek to `des_begin` and copy
 /// `tot_length` bytes, in `MAX_LINE_SIZE` chunks exactly as upstream does.
-fn copy_records<W: std::io::Write>(
-    src: &mut RecordSource,
-    out: &mut W,
-    records: &[(u64, i32)],
-) {
+fn copy_records<W: std::io::Write>(src: &mut RecordSource, out: &mut W, records: &[(u64, i32)]) {
     let mut buf = vec![0u8; MAX_LINE_SIZE];
     for &(des_begin, tot_length) in records {
         src.seek(des_begin);
@@ -3087,6 +3504,10 @@ impl SequenceDB {
     ///
     /// COMPAT: the single-file writer ignores `-sf` (`sort_outputf`); only the paired-end
     /// writer honours it. Preserved.
+    ///
+    /// COMPAT: `options` is unread here. Upstream's only use of it is to forward it to
+    /// `WriteClustersgz` for `.gz` input (`cdhit-common.c++:2385`), and that dispatch lives
+    /// in `RecordSource::open` in the port. The argument is kept so the call sites match.
     pub fn write_clusters(&self, db: &str, newdb: &str, _options: &Options) {
         let n = self.rep_seqs.len();
         let mut sorting: Vec<u64> = (0..n)
@@ -3168,7 +3589,9 @@ impl SequenceDB {
         let mut fout = std::io::BufWriter::with_capacity(1 << 16, fout);
         let mut fout_pe = std::io::BufWriter::with_capacity(1 << 16, fout_pe);
 
-        let r1: Vec<(u64, i32)> = (0..n).map(|i| (pick(i).des_begin, pick(i).tot_length)).collect();
+        let r1: Vec<(u64, i32)> = (0..n)
+            .map(|i| (pick(i).des_begin, pick(i).tot_length))
+            .collect();
         let r2: Vec<(u64, i32)> = (0..n)
             .map(|i| (pick(i).des_begin2, pick(i).tot_length2))
             .collect();
@@ -3177,6 +3600,9 @@ impl SequenceDB {
     }
 
     /// `SequenceDB::DivideSave`
+    ///
+    /// COMPAT: `options` is dead upstream too -- `DivideSave` takes it and never reads it
+    /// (`cdhit-common.c++:2302`). Kept so the signature matches.
     pub fn divide_save(&self, db: &str, newdb: &str, n: i32, _options: &Options) {
         if n == 0 || self.sequences.is_empty() {
             return;
@@ -3501,7 +3927,7 @@ impl WorkingParam {
         if (options.short_coverage > 0.0) || (options.min_control > 0) {
             // has alignment coverage control
             self.aln_cover_flag = 1;
-            self.min_aln_len_s = (len as f64 * options.short_coverage) as i32;
+            self.min_aln_len_s = cvt_int(len as f64 * options.short_coverage);
             if len - options.short_control > self.min_aln_len_s {
                 self.min_aln_len_s = len - options.short_control;
             }
@@ -3517,7 +3943,7 @@ impl WorkingParam {
     /// `WorkingParam::ControlLongCoverage`
     pub fn control_long_coverage(&mut self, len2: i32, options: &Options) {
         if self.aln_cover_flag != 0 {
-            self.min_aln_len_l = (len2 as f64 * options.long_coverage) as i32;
+            self.min_aln_len_l = cvt_int(len2 as f64 * options.long_coverage);
             if len2 - options.long_control > self.min_aln_len_l {
                 self.min_aln_len_l = len2 - options.long_control;
             }
@@ -3546,20 +3972,33 @@ impl WorkingParam {
         // if g == band_width: word count = (n - band + 1)*(1 - d*m);
         if options.use_distance {
             let band = options.band_width + 1;
-            let invd = (1.0 / (options.distance_thd + 1e-9)) as i32;
-            let k = if self.len_eff < invd { self.len_eff } else { invd };
+            let invd = cvt_int(1.0 / (options.distance_thd + 1e-9));
+            // COMPAT: upstream computes `k` and never reads it (`cdhit-common.c++:2792`).
+            // Note that the clamp two lines below the `//if(...)` comments uses `ks`, not
+            // `k`: `required_aa1 = required_aas = (ks2 < ks ? ks2 : ks)`.
+            let _k = if self.len_eff < invd {
+                self.len_eff
+            } else {
+                invd
+            };
             let ks = self.len_eff - ss + 1;
             let kn = self.len_eff - naa + 1;
             let ks2 = invd - ss;
             let kn2 = invd - naa;
-            let _ks3 =
-                ((self.len_eff - band + 1) as f64 * (1.0 - options.distance_thd * ss as f64)) as i32;
-            let _kn3 = ((self.len_eff - band + 1) as f64
-                * (1.0 - options.distance_thd * naa as f64)) as i32;
+            // COMPAT: upstream computes `ks3` / `kn3` and discards them -- their only
+            // readers are the two `//if( ks3 > ks2 )` lines below, which are commented out
+            // in the shipped source (`cdhit-common.c++:2797`). Kept so the branch reads
+            // line-for-line against the original; `band` exists only to feed them.
+            // `(len_eff - band + 1.0)` is a double add in the C++, not an int one.
+            let _ks3 = cvt_int(
+                ((self.len_eff - band) as f64 + 1.0) * (1.0 - options.distance_thd * ss as f64),
+            );
+            let _kn3 = cvt_int(
+                ((self.len_eff - band) as f64 + 1.0) * (1.0 - options.distance_thd * naa as f64),
+            );
             //if( ks3 > ks2 ) ks2 = ks3;
             //if( kn3 > kn2 ) kn2 = kn3;
-            let _ = (ks, k);
-            self.required_aa1 = if ks2 < k { ks2 } else { k };
+            self.required_aa1 = if ks2 < ks { ks2 } else { ks };
             self.required_aas = self.required_aa1;
             self.required_aan = if kn2 < kn { kn2 } else { kn };
             if self.required_aa1 <= 0 {
@@ -3574,20 +4013,20 @@ impl WorkingParam {
         }
         // (N-K)-K*(1-C)*N = C*K*N-(K-1)*N-K = (C*K-K+1)*N-K
         self.required_aa1 = (self.len_eff - ss)
-            - (ss as f64 * ((1.0 - self.aa1_cutoff) * self.len_eff as f64).ceil()) as i32;
+            - cvt_int(ss as f64 * ((1.0 - self.aa1_cutoff) * self.len_eff as f64).ceil());
         if self.required_aa1 < 0 {
             self.required_aa1 = 0;
         }
         self.required_aas = self.required_aa1;
         self.required_aan = (self.len_eff - naa)
-            - (naa as f64 * ((1.0 - self.aa1_cutoff) * self.len_eff as f64).ceil()) as i32;
+            - cvt_int(naa as f64 * ((1.0 - self.aa1_cutoff) * self.len_eff as f64).ceil());
         if self.required_aan < 0 {
             self.required_aan = 0;
         }
 
-        let aa1_old = (self.aa1_cutoff * self.len_eff as f64) as i32 - ss + 1;
-        let aas_old = (self.aas_cutoff * self.len_eff as f64) as i32;
-        let aan_old = (self.aan_cutoff * self.len_eff as f64) as i32;
+        let aa1_old = cvt_int(self.aa1_cutoff * self.len_eff as f64) - ss + 1;
+        let aas_old = cvt_int(self.aas_cutoff * self.len_eff as f64);
+        let aan_old = cvt_int(self.aan_cutoff * self.len_eff as f64);
 
         let thd = options.cluster_thd;
         //double rest = (len_eff - ss) / double(len_eff * ss);
@@ -3600,21 +4039,33 @@ impl WorkingParam {
             fold = 1.0 - fnew;
         }
 
-        self.required_aa1 = (fnew * self.required_aa1 as f64 + fold * aa1_old as f64) as i32;
-        self.required_aas = (fnew * self.required_aas as f64 + fold * aas_old as f64) as i32;
-        self.required_aan = (fnew * self.required_aan as f64 + fold * aan_old as f64) as i32;
+        self.required_aa1 = cvt_int(fnew * self.required_aa1 as f64 + fold * aa1_old as f64);
+        self.required_aas = cvt_int(fnew * self.required_aas as f64 + fold * aas_old as f64);
+        self.required_aan = cvt_int(fnew * self.required_aan as f64 + fold * aan_old as f64);
     }
 }
 
 // when alignment coverage such as -aL is specified
 // if a existing rep is too long, it won't be qulified
 /// `upper_bound_length_rep( int, double, int, double, int )`
-pub fn upper_bound_length_rep_raw(len: i32, opt_s: f64, opt_s_aa: i32, opt_al: f64, opt_al_aa: i32) -> i32 {
+pub fn upper_bound_length_rep_raw(
+    len: i32,
+    opt_s: f64,
+    opt_s_aa: i32,
+    opt_al: f64,
+    opt_al_aa: i32,
+) -> i32 {
     let mut len_upper_bound = 99999999;
     let r1 = if opt_s > opt_al { opt_s } else { opt_al };
-    let a2 = if opt_s_aa < opt_al_aa { opt_s_aa } else { opt_al_aa };
+    let a2 = if opt_s_aa < opt_al_aa {
+        opt_s_aa
+    } else {
+        opt_al_aa
+    };
     if r1 > 0.0 {
-        len_upper_bound = (len as f32 / r1 as f32) as i32;
+        // `((float) len) / r1` promotes the float operand to `double`: the division is
+        // done in double precision, only the numerator is rounded to float.
+        len_upper_bound = cvt_int((len as f32) as f64 / r1);
     }
     if (len + a2) < len_upper_bound {
         len_upper_bound = len + a2;
@@ -3652,12 +4103,13 @@ pub fn cal_aax_cutoff(
         return;
     }
 
-    let mut clstr_idx = (cluster_thd * 100.0) as i32 - naa_stat_start_percent;
+    let mut clstr_idx = cvt_int(cluster_thd * 100.0) - naa_stat_start_percent;
     if clstr_idx < 0 {
         clstr_idx = 0;
     }
     let d2 = naa_stat[(tolerance - 1) as usize][clstr_idx as usize][3] as f64 / 100.0;
-    let dn = naa_stat[(tolerance - 1) as usize][clstr_idx as usize][(5 - naa) as usize] as f64 / 100.0;
+    let dn =
+        naa_stat[(tolerance - 1) as usize][clstr_idx as usize][(5 - naa) as usize] as f64 / 100.0;
     *aa2_cutoff = if d2 > *aa2_cutoff { d2 } else { *aa2_cutoff };
     *aan_cutoff = if dn > *aan_cutoff { dn } else { *aan_cutoff };
 } // END cal_aax_cutoff
@@ -3728,6 +4180,7 @@ impl WorkingBuffer {
             diag_score: Vec::new(),
             aan_list_comp: Vec::new(),
             seqi_comp: Vec::new(),
+            simd: SimdDiag::default(),
             total_bytes: 0,
         };
         b.set(frag, maxlen, max_diag_len, options);
@@ -3755,7 +4208,11 @@ impl WorkingBuffer {
         self.word_encodes_no.resize(max_len, 0);
         self.word_encodes_backup.resize(max_len, 0);
         /* each table can not contain more than MAX_TABLE_SEQ representatives or fragments! */
-        let frag = if frag > MAX_TABLE_SEQ { MAX_TABLE_SEQ } else { frag };
+        let frag = if frag > MAX_TABLE_SEQ {
+            MAX_TABLE_SEQ
+        } else {
+            frag
+        };
         self.look_counts = LookCounts::new(frag + 2);
         self.index_mapping.resize(frag + 2, 0);
         // `diag_score.resize( MAX_DIAG )` upstream, where MAX_DIAG == 2 * MAX_SEQ; the
@@ -3814,7 +4271,11 @@ impl WorkingBuffer {
                     } else {
                         0
                     };
-                    let i1 = if (j as i32) < aan_no { j as i32 } else { aan_no - 1 };
+                    let i1 = if (j as i32) < aan_no {
+                        j as i32
+                    } else {
+                        aan_no - 1
+                    };
                     for i in i0..=i1 {
                         self.word_encodes[i as usize] = -1;
                     }
@@ -3868,7 +4329,11 @@ impl WorkingBuffer {
     }
 
     /// `WorkingBuffer::ComputeAAP2`
+    ///
+    /// Also groups the query's 4-mers for the vectorised diagonal test; both indexes
+    /// describe the same query and are rebuilt at the same moments.
     pub fn compute_aap2(&mut self, seqi: &[u8], size: i32, naa_tab: &Naa) {
+        self.simd.prepare_query(seqi, size);
         let naa1 = naa_tab.naa1();
         let naa2 = naa_tab.naa2();
         let naa3 = naa_tab.naa3();
@@ -4002,11 +4467,7 @@ impl SequenceDB {
             print!(".");
             let _ = std::io::stdout().flush();
             if (id + 1) % 10000 == 0 {
-                println!(
-                    "\r..........{:9}  finished  {:9}  clusters",
-                    id + 1,
-                    size
-                );
+                println!("\r..........{:9}  finished  {:9}  clusters", id + 1, size);
             }
         }
     }
@@ -4099,6 +4560,10 @@ pub fn memory_limit(mem_need: usize, options: &Options) -> usize {
 
 impl Options {
     /// `Options::ComputeTableLimits`
+    ///
+    /// COMPAT: `min_len` is dead upstream -- the body reads only `max_len`, `typical_len`,
+    /// `threads`, `max_memory` and `mem_need` (`cdhit-common.c++:3006`). All three call
+    /// sites pass it, so it is kept in the signature.
     pub fn compute_table_limits(
         &mut self,
         _min_len: i32,
@@ -4116,15 +4581,24 @@ impl Options {
         //T=64 scale=0.0703
 
         let scale = 0.5 / self.threads as f64 + 0.5 / (self.threads as f64).sqrt();
-        self.max_sequences = (scale * MAX_TABLE_SEQ as f64) as usize;
-        self.max_entries = (scale
-            * (500i32.wrapping_mul(max_len))
-                .wrapping_add(500000i32.wrapping_mul(typical_len))
-                .wrapping_add(50000000) as f64) as usize;
+        self.max_sequences = cvt_size(scale * MAX_TABLE_SEQ as f64);
+        // The inner expression is `int` arithmetic upstream and overflows once
+        // `typical_len` (the N50) passes ~4294 -- routine for contigs and long reads. The
+        // wrapped value is negative, and `(size_t)` of a negative double is a near-`u64::MAX`
+        // limit, i.e. effectively unlimited. `cvt_size` reproduces that; a plain `as usize`
+        // would saturate to 0 and hang the block loop in `do_clustering`.
+        self.max_entries = cvt_size(
+            scale
+                * (500i32.wrapping_mul(max_len))
+                    .wrapping_add(500000i32.wrapping_mul(typical_len))
+                    .wrapping_add(50000000) as f64,
+        );
         if self.max_memory != 0 {
             let frac = self.max_sequences as f64 / self.max_entries as f64;
             self.max_entries = (self.max_memory.wrapping_sub(mem_need)) / 8;
-            self.max_sequences = (self.max_entries as f64 * frac) as usize;
+            self.max_sequences = cvt_size(self.max_entries as f64 * frac);
+            // Upstream's two separate `if`s (`cdhit-common.c++:3024`), not a `clamp`.
+            #[allow(clippy::manual_clamp)]
             if self.max_sequences < MAX_TABLE_SEQ / 100 {
                 self.max_sequences = MAX_TABLE_SEQ / 100;
             }
@@ -4134,7 +4608,10 @@ impl Options {
         }
         println!("Table limit with the given memory limit:");
         println!("Max number of representatives: {}", self.max_sequences);
-        println!("Max number of word counting entries: {}\n", self.max_entries);
+        println!(
+            "Max number of word counting entries: {}\n",
+            self.max_entries
+        );
     }
 }
 
@@ -4185,7 +4662,7 @@ pub fn check_one_aa(
         let mut min = db[table.sequences[s - 1]].size;
         if min < len {
             if len as f64 * options.diff_cutoff2 > min as f64 {
-                min = (len as f64 * options.diff_cutoff2) as i32;
+                min = cvt_int(len as f64 * options.diff_cutoff2);
             }
             if (len - options.diff_cutoff_aa2) > min {
                 min = len - options.diff_cutoff_aa2;
@@ -4198,7 +4675,7 @@ pub fn check_one_aa(
     //longer seqeunce * -aL -band_width
     if s != 0 {
         let min = db[table.sequences[s - 1]].size;
-        let min_red = (min as f64 * options.long_coverage - options.band_width as f64) as i32;
+        let min_red = cvt_int(min as f64 * options.long_coverage - options.band_width as f64);
         if len < min_red {
             return 0; // return flag=0
         }
@@ -4464,7 +4941,7 @@ pub fn check_one_est(
         let mut min = db[table.sequences[s - 1]].size;
         if min < len {
             if len as f64 * options.diff_cutoff2 > min as f64 {
-                min = (len as f64 * options.diff_cutoff2) as i32;
+                min = cvt_int(len as f64 * options.diff_cutoff2);
             }
             if (len - options.diff_cutoff_aa2) > min {
                 min = len - options.diff_cutoff_aa2;
@@ -4477,7 +4954,7 @@ pub fn check_one_est(
     //longer seqeunce * -aL -band_width
     if s != 0 {
         let min = db[table.sequences[s - 1]].size;
-        let min_red = (min as f64 * options.long_coverage - options.band_width as f64) as i32;
+        let min_red = cvt_int(min as f64 * options.long_coverage - options.band_width as f64);
         if len < min_red {
             return 0; // return flag=0
         }
@@ -4801,13 +5278,18 @@ impl<'a> SeqCells<'a> {
 /// same slot `len` times and never actually reverses anything. Reproduced, except that the
 /// write is skipped when `i` is past the end of the buffer -- upstream would corrupt memory
 /// there, and there is no defined behaviour to match.
+///
+/// COMPAT: `comp_aan_idx` is unread. Upstream's `Comp_AAN_idx` is a global, and nothing on
+/// this path touches it -- the reverse pass above open-codes its own (broken) copy loop
+/// rather than calling `make_comp_iseq`. The argument is kept so the entry point matches
+/// the other `SequenceDB` drivers, which all take the four C++ globals explicitly.
 impl SequenceDB {
     pub fn compute_distance(
         &self,
         options: &Options,
         mat: &ScoreMatrix,
         naa_tab: &Naa,
-        comp_aan_idx: &[i32],
+        _comp_aan_idx: &[i32],
     ) {
         let n = self.sequences.len();
         let mut best_score = 0;
@@ -4820,12 +5302,6 @@ impl SequenceDB {
         let mut talign_info = [0i32; 5];
         let mut distance = 0.0f32;
         let mut buf = WorkingBuffer::new(n, self.max_len, self.max_len, options);
-        let g = Globals {
-            options,
-            mat,
-            naa: naa_tab,
-            comp_aan_idx,
-        };
 
         let mut dists: Vec<Vec<f32>> = vec![vec![0.0; n]; n];
 
@@ -4849,13 +5325,35 @@ impl SequenceDB {
                     len + len2 - 2
                 };
                 diag_test_aapn_est(
-                    naa_tab.naa1(), &rep.data, len, len2, &mut buf, &mut best_sum,
-                    band_width1, &mut band_left, &mut band_center, &mut band_right, 0, options,
+                    naa_tab.naa1(),
+                    &rep.data,
+                    len,
+                    len2,
+                    &mut buf,
+                    &mut best_sum,
+                    band_width1,
+                    &mut band_left,
+                    &mut band_center,
+                    &mut band_right,
+                    0,
+                    options,
                 );
                 local_band_align(
-                    &seq.data, &rep.data, len, len2, mat, &mut best_score, &mut tiden_no,
-                    &mut alnln, &mut distance, Some(&mut talign_info),
-                    band_left, band_center, band_right, &mut buf, options,
+                    &seq.data,
+                    &rep.data,
+                    len,
+                    len2,
+                    mat,
+                    &mut best_score,
+                    &mut tiden_no,
+                    &mut alnln,
+                    &mut distance,
+                    Some(&mut talign_info),
+                    band_left,
+                    band_center,
+                    band_right,
+                    &mut buf,
+                    options,
                 );
                 dists[seq.index as usize][rep.index as usize] = distance;
                 dists[rep.index as usize][seq.index as usize] = distance;
@@ -4882,13 +5380,35 @@ impl SequenceDB {
                     len + len2 - 2
                 };
                 diag_test_aapn_est(
-                    naa_tab.naa1(), &rep.data, len, len2, &mut buf, &mut best_sum,
-                    band_width1, &mut band_left, &mut band_center, &mut band_right, 0, options,
+                    naa_tab.naa1(),
+                    &rep.data,
+                    len,
+                    len2,
+                    &mut buf,
+                    &mut best_sum,
+                    band_width1,
+                    &mut band_left,
+                    &mut band_center,
+                    &mut band_right,
+                    0,
+                    options,
                 );
                 local_band_align(
-                    &comseq.data, &rep.data, len, len2, mat, &mut best_score, &mut tiden_no,
-                    &mut alnln, &mut distance, Some(&mut talign_info),
-                    band_left, band_center, band_right, &mut buf, options,
+                    &comseq.data,
+                    &rep.data,
+                    len,
+                    len2,
+                    mat,
+                    &mut best_score,
+                    &mut tiden_no,
+                    &mut alnln,
+                    &mut distance,
+                    Some(&mut talign_info),
+                    band_left,
+                    band_center,
+                    band_right,
+                    &mut buf,
+                    options,
                 );
                 if distance < dists[seq.index as usize][rep.index as usize] {
                     dists[seq.index as usize][rep.index as usize] = distance;
@@ -4896,10 +5416,9 @@ impl SequenceDB {
                 }
             }
         }
-        let _ = g;
         let output = format!("{}.dist", options.output);
-        let f = std::fs::File::create(&output)
-            .unwrap_or_else(|_| bomb_error("file opening failed"));
+        let f =
+            std::fs::File::create(&output).unwrap_or_else(|_| bomb_error("file opening failed"));
         let mut fout = std::io::BufWriter::with_capacity(1 << 16, f);
         let _ = write!(fout, "1");
         for i in 1..n {
@@ -5059,11 +5578,19 @@ impl SequenceDB {
             );
         }
 
+        // Only the screen phase runs in parallel, and it covers the sequences *after* the
+        // current block -- which is an empty range whenever the database fits one word
+        // table, i.e. for anything under roughly 150 Mbp at the default -M. Allocating T
+        // scratch buffers up front therefore costs tens of megabytes that are never
+        // touched (measured: +64 MB at -T 40). Start with one and grow on first use.
         let mut params: Vec<WorkingParam> =
-            (0..t).map(|_| WorkingParam::new(aa1_cutoff, aas_cutoff, aan_cutoff)).collect();
-        let mut buffers: Vec<WorkingBuffer> = (0..t)
-            .map(|_| WorkingBuffer::new(frag_no as usize, self.max_len, self.max_len, options))
-            .collect();
+            vec![WorkingParam::new(aa1_cutoff, aas_cutoff, aan_cutoff)];
+        let mut buffers: Vec<WorkingBuffer> = vec![WorkingBuffer::new(
+            frag_no as usize,
+            self.max_len,
+            self.max_len,
+            options,
+        )];
 
         let mut word_table = WordTable::new(options.naa, self.naan);
 
@@ -5075,6 +5602,9 @@ impl SequenceDB {
             0,
             comp_aan_idx.len(),
         );
+        // COMPAT: upstream assigns this to a local it never reads
+        // (`cdhit-common.c++:3700` / `:3822`); `ComputeTableLimits` below is what actually
+        // sets the limits. Kept because `MemoryLimit` is not otherwise called.
         let _mem_limit = memory_limit(mem_need, options);
         let mega: usize = 1000000;
         let n = self.sequences.len();
@@ -5126,13 +5656,22 @@ impl SequenceDB {
             }
             println!("\rcomparing sequences from  {:9}  to  {:9}", i, m);
             let _ = std::io::stdout().flush();
+            // `i` is upstream's outer cursor, seeded into `ks` once and then advanced so
+            // the code after the loop knows where the block ended; the bound `m` is fixed.
+            #[allow(clippy::mut_range_bound)]
             for ks in i..m {
                 // clustering this block
                 i = ks + 1;
                 if self.sequences[ks].state & IS_REDUNDANT != 0 {
                     continue;
                 }
-                self.cluster_one(ks as i32, &mut word_table, &mut params[0], &mut buffers[0], g);
+                self.cluster_one(
+                    ks as i32,
+                    &mut word_table,
+                    &mut params[0],
+                    &mut buffers[0],
+                    g,
+                );
                 if word_table.size >= max_items {
                     break;
                 }
@@ -5168,6 +5707,17 @@ impl SequenceDB {
                 if shortest_rep > upper_bound_length_rep(self.sequences[j].size, options) {
                     j_end = j + 1;
                     break;
+                }
+            }
+            if t > 1 && j_end > m {
+                while buffers.len() < t {
+                    params.push(WorkingParam::new(aa1_cutoff, aas_cutoff, aan_cutoff));
+                    buffers.push(WorkingBuffer::new(
+                        frag_no as usize,
+                        self.max_len,
+                        self.max_len,
+                        options,
+                    ));
                 }
             }
             self.screen_against_table(m, j_end, &word_table, &mut params, &mut buffers, g, t);
@@ -5241,6 +5791,9 @@ impl SequenceDB {
             other.total_letter as usize + other.total_desc as usize,
             comp_aan_idx.len(),
         );
+        // COMPAT: upstream assigns this to a local it never reads
+        // (`cdhit-common.c++:3700` / `:3822`); `ComputeTableLimits` below is what actually
+        // sets the limits. Kept because `MemoryLimit` is not otherwise called.
         let _mem_limit = memory_limit(mem_need, options);
 
         // COMPAT: as in `do_clustering`, the table limits are computed with `threads = 1`
@@ -5340,10 +5893,7 @@ impl SequenceDB {
                 t,
             );
 
-            println!(
-                "\r..........{:9}  compared  {:9}  clusters",
-                i, nr2_red_no
-            );
+            println!("\r..........{:9}  compared  {:9}  clusters", i, nr2_red_no);
             word_table.clear();
             word_table.size = 0;
             i = m;
@@ -5400,7 +5950,7 @@ fn screen_2d(
         let len_upper_bound = upper_bound_length_rep(len, options);
         let mut len_lower_bound = len - options.diff_cutoff_aa2;
 
-        let len_tmp = (len as f64 * options.diff_cutoff2) as i32;
+        let len_tmp = cvt_int(len as f64 * options.diff_cutoff2);
         if len_tmp < len_lower_bound {
             len_lower_bound = len_tmp;
         }
@@ -5424,8 +5974,7 @@ fn screen_2d(
     };
 
     if threads <= 1 || n < 64 {
-        let (param, rest) = params.split_first_mut().unwrap();
-        let _ = rest;
+        let param = &mut params[0];
         let buf = &mut buffers[0];
         let mut red = 0;
         let mut p0 = 0.0f32;
@@ -5493,8 +6042,8 @@ pub fn calc_ann_list(
         let mut encode = 0i32;
         let mut k1 = naa - 1;
         for k in 0..naa as usize {
-            encode = encode
-                .wrapping_add((word[k] as i32).wrapping_mul(naa_tab.naan_array[k1 as usize]));
+            encode =
+                encode.wrapping_add((word[k] as i32).wrapping_mul(naa_tab.naan_array[k1 as usize]));
             k1 -= 1;
         }
         aan_list[j] = encode;
@@ -5573,327 +6122,327 @@ pub static NAA_STAT: [[[i32; 4]; 61]; 5] = [
     // cover 0.99
     [
         //  N=5   N=4   N=3   N=2
-        [   0,    0,    0,    7], // 40%
-        [   0,    0,    0,    8], // 41%
-        [   0,    0,    0,    9], // 42%
-        [   0,    0,    0,    9], // 43%
-        [   0,    0,    1,   10], // 44%
-        [   0,    0,    1,   11], // 45%
-        [   0,    0,    1,   12], // 46%
-        [   0,    0,    2,   13], // 47%
-        [   0,    0,    2,   14], // 48%
-        [   0,    0,    4,   16], // 49%
-        [   0,    0,    4,   16], // 50%
-        [   0,    0,    5,   17], // 51%
-        [   0,    0,    5,   18], // 52%
-        [   0,    0,    7,   20], // 53%
-        [   0,    1,    7,   21], // 54%
-        [   0,    1,    7,   21], // 55%
-        [   0,    2,    8,   23], // 56%
-        [   0,    2,    8,   25], // 57%
-        [   0,    2,   10,   25], // 58%
-        [   0,    3,   10,   26], // 59%
-        [   0,    4,   13,   28], // 60%
-        [   0,    5,   13,   30], // 61%
-        [   0,    5,   14,   30], // 62%
-        [   1,    6,   15,   33], // 63%
-        [   2,    7,   17,   34], // 64%
-        [   2,    7,   17,   35], // 65%
-        [   2,    9,   20,   37], // 66%
-        [   4,   10,   20,   37], // 67%
-        [   4,   11,   22,   40], // 68%
-        [   5,   12,   24,   41], // 69%
-        [   5,   12,   25,   42], // 70%
-        [   6,   16,   27,   43], // 71%
-        [   8,   16,   27,   45], // 72%
-        [   9,   17,   29,   47], // 73%
-        [  10,   18,   31,   47], // 74%
-        [  10,   20,   32,   50], // 75%
-        [  12,   20,   32,   51], // 76%
-        [  14,   22,   36,   54], // 77%
-        [  15,   24,   37,   55], // 78%
-        [  17,   26,   41,   58], // 79%
-        [  18,   29,   41,   59], // 80%
-        [  20,   30,   45,   60], // 81%
-        [  24,   35,   48,   62], // 82%
-        [  26,   36,   48,   64], // 83%
-        [  27,   38,   51,   65], // 84%
-        [  31,   43,   54,   68], // 85%
-        [  35,   43,   55,   70], // 86%
-        [  36,   48,   60,   71], // 87%
-        [  36,   50,   61,   73], // 88%
-        [  40,   50,   61,   75], // 89%
-        [  45,   54,   65,   75], // 90%
-        [  52,   60,   70,   79], // 91%
-        [  53,   62,   71,   81], // 92%
-        [  57,   66,   75,   84], // 93%
-        [  57,   66,   76,   85], // 94%
-        [  64,   71,   78,   85], // 95%
-        [  70,   75,   82,   89], // 96%
-        [  77,   81,   86,   92], // 97%
-        [  82,   86,   90,   94], // 98%
-        [  83,   87,   91,   95], // 99%
-        [  91,   93,   95,   97], // 100%
+        [0, 0, 0, 7],     // 40%
+        [0, 0, 0, 8],     // 41%
+        [0, 0, 0, 9],     // 42%
+        [0, 0, 0, 9],     // 43%
+        [0, 0, 1, 10],    // 44%
+        [0, 0, 1, 11],    // 45%
+        [0, 0, 1, 12],    // 46%
+        [0, 0, 2, 13],    // 47%
+        [0, 0, 2, 14],    // 48%
+        [0, 0, 4, 16],    // 49%
+        [0, 0, 4, 16],    // 50%
+        [0, 0, 5, 17],    // 51%
+        [0, 0, 5, 18],    // 52%
+        [0, 0, 7, 20],    // 53%
+        [0, 1, 7, 21],    // 54%
+        [0, 1, 7, 21],    // 55%
+        [0, 2, 8, 23],    // 56%
+        [0, 2, 8, 25],    // 57%
+        [0, 2, 10, 25],   // 58%
+        [0, 3, 10, 26],   // 59%
+        [0, 4, 13, 28],   // 60%
+        [0, 5, 13, 30],   // 61%
+        [0, 5, 14, 30],   // 62%
+        [1, 6, 15, 33],   // 63%
+        [2, 7, 17, 34],   // 64%
+        [2, 7, 17, 35],   // 65%
+        [2, 9, 20, 37],   // 66%
+        [4, 10, 20, 37],  // 67%
+        [4, 11, 22, 40],  // 68%
+        [5, 12, 24, 41],  // 69%
+        [5, 12, 25, 42],  // 70%
+        [6, 16, 27, 43],  // 71%
+        [8, 16, 27, 45],  // 72%
+        [9, 17, 29, 47],  // 73%
+        [10, 18, 31, 47], // 74%
+        [10, 20, 32, 50], // 75%
+        [12, 20, 32, 51], // 76%
+        [14, 22, 36, 54], // 77%
+        [15, 24, 37, 55], // 78%
+        [17, 26, 41, 58], // 79%
+        [18, 29, 41, 59], // 80%
+        [20, 30, 45, 60], // 81%
+        [24, 35, 48, 62], // 82%
+        [26, 36, 48, 64], // 83%
+        [27, 38, 51, 65], // 84%
+        [31, 43, 54, 68], // 85%
+        [35, 43, 55, 70], // 86%
+        [36, 48, 60, 71], // 87%
+        [36, 50, 61, 73], // 88%
+        [40, 50, 61, 75], // 89%
+        [45, 54, 65, 75], // 90%
+        [52, 60, 70, 79], // 91%
+        [53, 62, 71, 81], // 92%
+        [57, 66, 75, 84], // 93%
+        [57, 66, 76, 85], // 94%
+        [64, 71, 78, 85], // 95%
+        [70, 75, 82, 89], // 96%
+        [77, 81, 86, 92], // 97%
+        [82, 86, 90, 94], // 98%
+        [83, 87, 91, 95], // 99%
+        [91, 93, 95, 97], // 100%
     ],
     // cover 0.95
     [
         //  N=5   N=4   N=3   N=2
-        [   0,    0,    1,    9], // 40%
-        [   0,    0,    2,   10], // 41%
-        [   0,    0,    2,   11], // 42%
-        [   0,    0,    3,   12], // 43%
-        [   0,    0,    3,   12], // 44%
-        [   0,    0,    4,   14], // 45%
-        [   0,    0,    4,   14], // 46%
-        [   0,    1,    5,   16], // 47%
-        [   0,    1,    6,   17], // 48%
-        [   0,    2,    7,   19], // 49%
-        [   0,    2,    8,   19], // 50%
-        [   0,    2,    8,   20], // 51%
-        [   0,    2,    9,   21], // 52%
-        [   0,    4,   10,   23], // 53%
-        [   1,    4,   11,   24], // 54%
-        [   1,    4,   11,   24], // 55%
-        [   1,    5,   13,   26], // 56%
-        [   2,    5,   13,   27], // 57%
-        [   2,    6,   15,   29], // 58%
-        [   2,    7,   15,   30], // 59%
-        [   3,    8,   16,   31], // 60%
-        [   4,    8,   18,   32], // 61%
-        [   4,    9,   18,   33], // 62%
-        [   5,   11,   20,   36], // 63%
-        [   6,   12,   22,   37], // 64%
-        [   6,   12,   22,   38], // 65%
-        [   8,   14,   24,   40], // 66%
-        [   8,   15,   25,   41], // 67%
-        [  10,   16,   27,   42], // 68%
-        [  10,   18,   28,   45], // 69%
-        [  11,   18,   29,   45], // 70%
-        [  14,   21,   31,   47], // 71%
-        [  14,   22,   32,   48], // 72%
-        [  14,   22,   33,   50], // 73%
-        [  17,   24,   36,   52], // 74%
-        [  17,   25,   36,   52], // 75%
-        [  18,   27,   39,   54], // 76%
-        [  20,   29,   41,   56], // 77%
-        [  21,   31,   42,   58], // 78%
-        [  21,   31,   46,   60], // 79%
-        [  27,   35,   46,   60], // 80%
-        [  28,   37,   50,   63], // 81%
-        [  31,   38,   50,   64], // 82%
-        [  34,   43,   53,   66], // 83%
-        [  36,   45,   54,   67], // 84%
-        [  41,   50,   60,   70], // 85%
-        [  43,   51,   60,   71], // 86%
-        [  45,   54,   63,   74], // 87%
-        [  48,   55,   64,   75], // 88%
-        [  54,   60,   68,   78], // 89%
-        [  55,   62,   71,   80], // 90%
-        [  56,   63,   71,   80], // 91%
-        [  64,   70,   76,   84], // 92%
-        [  69,   74,   80,   86], // 93%
-        [  73,   78,   83,   88], // 94%
-        [  74,   78,   84,   89], // 95%
-        [  80,   84,   87,   91], // 96%
-        [  83,   86,   90,   93], // 97%
-        [  86,   89,   92,   95], // 98%
-        [  91,   93,   95,   97], // 99%
-        [  92,   93,   95,   97], // 100%
+        [0, 0, 1, 9],     // 40%
+        [0, 0, 2, 10],    // 41%
+        [0, 0, 2, 11],    // 42%
+        [0, 0, 3, 12],    // 43%
+        [0, 0, 3, 12],    // 44%
+        [0, 0, 4, 14],    // 45%
+        [0, 0, 4, 14],    // 46%
+        [0, 1, 5, 16],    // 47%
+        [0, 1, 6, 17],    // 48%
+        [0, 2, 7, 19],    // 49%
+        [0, 2, 8, 19],    // 50%
+        [0, 2, 8, 20],    // 51%
+        [0, 2, 9, 21],    // 52%
+        [0, 4, 10, 23],   // 53%
+        [1, 4, 11, 24],   // 54%
+        [1, 4, 11, 24],   // 55%
+        [1, 5, 13, 26],   // 56%
+        [2, 5, 13, 27],   // 57%
+        [2, 6, 15, 29],   // 58%
+        [2, 7, 15, 30],   // 59%
+        [3, 8, 16, 31],   // 60%
+        [4, 8, 18, 32],   // 61%
+        [4, 9, 18, 33],   // 62%
+        [5, 11, 20, 36],  // 63%
+        [6, 12, 22, 37],  // 64%
+        [6, 12, 22, 38],  // 65%
+        [8, 14, 24, 40],  // 66%
+        [8, 15, 25, 41],  // 67%
+        [10, 16, 27, 42], // 68%
+        [10, 18, 28, 45], // 69%
+        [11, 18, 29, 45], // 70%
+        [14, 21, 31, 47], // 71%
+        [14, 22, 32, 48], // 72%
+        [14, 22, 33, 50], // 73%
+        [17, 24, 36, 52], // 74%
+        [17, 25, 36, 52], // 75%
+        [18, 27, 39, 54], // 76%
+        [20, 29, 41, 56], // 77%
+        [21, 31, 42, 58], // 78%
+        [21, 31, 46, 60], // 79%
+        [27, 35, 46, 60], // 80%
+        [28, 37, 50, 63], // 81%
+        [31, 38, 50, 64], // 82%
+        [34, 43, 53, 66], // 83%
+        [36, 45, 54, 67], // 84%
+        [41, 50, 60, 70], // 85%
+        [43, 51, 60, 71], // 86%
+        [45, 54, 63, 74], // 87%
+        [48, 55, 64, 75], // 88%
+        [54, 60, 68, 78], // 89%
+        [55, 62, 71, 80], // 90%
+        [56, 63, 71, 80], // 91%
+        [64, 70, 76, 84], // 92%
+        [69, 74, 80, 86], // 93%
+        [73, 78, 83, 88], // 94%
+        [74, 78, 84, 89], // 95%
+        [80, 84, 87, 91], // 96%
+        [83, 86, 90, 93], // 97%
+        [86, 89, 92, 95], // 98%
+        [91, 93, 95, 97], // 99%
+        [92, 93, 95, 97], // 100%
     ],
     // cover 0.90
     [
         //  N=5   N=4   N=3   N=2
-        [   0,    0,    2,   11], // 40%
-        [   0,    0,    3,   12], // 41%
-        [   0,    0,    3,   12], // 42%
-        [   0,    1,    4,   13], // 43%
-        [   0,    1,    5,   14], // 44%
-        [   0,    1,    5,   15], // 45%
-        [   0,    1,    6,   16], // 46%
-        [   0,    2,    7,   18], // 47%
-        [   0,    2,    7,   18], // 48%
-        [   0,    3,    9,   20], // 49%
-        [   1,    4,    9,   20], // 50%
-        [   1,    4,   10,   21], // 51%
-        [   1,    4,   11,   23], // 52%
-        [   2,    5,   12,   24], // 53%
-        [   2,    5,   12,   25], // 54%
-        [   2,    6,   13,   26], // 55%
-        [   3,    7,   14,   28], // 56%
-        [   3,    7,   15,   28], // 57%
-        [   4,    8,   16,   30], // 58%
-        [   5,    9,   17,   31], // 59%
-        [   5,   10,   18,   32], // 60%
-        [   6,   11,   20,   35], // 61%
-        [   6,   11,   20,   35], // 62%
-        [   7,   13,   22,   38], // 63%
-        [   8,   14,   23,   39], // 64%
-        [   8,   15,   24,   39], // 65%
-        [  10,   16,   26,   42], // 66%
-        [  10,   17,   27,   42], // 67%
-        [  12,   19,   29,   44], // 68%
-        [  13,   20,   30,   46], // 69%
-        [  13,   21,   31,   47], // 70%
-        [  16,   23,   33,   48], // 71%
-        [  18,   25,   34,   50], // 72%
-        [  18,   26,   36,   51], // 73%
-        [  19,   28,   38,   53], // 74%
-        [  20,   29,   38,   53], // 75%
-        [  23,   30,   41,   56], // 76%
-        [  24,   33,   43,   57], // 77%
-        [  26,   34,   45,   59], // 78%
-        [  28,   37,   48,   61], // 79%
-        [  30,   37,   48,   62], // 80%
-        [  33,   42,   52,   64], // 81%
-        [  35,   43,   53,   65], // 82%
-        [  38,   47,   56,   68], // 83%
-        [  40,   47,   56,   68], // 84%
-        [  44,   53,   61,   71], // 85%
-        [  45,   53,   62,   73], // 86%
-        [  50,   58,   66,   75], // 87%
-        [  51,   58,   66,   76], // 88%
-        [  57,   63,   71,   79], // 89%
-        [  60,   66,   72,   81], // 90%
-        [  62,   68,   75,   83], // 91%
-        [  70,   74,   80,   85], // 92%
-        [  74,   78,   82,   88], // 93%
-        [  85,   87,   90,   92], // 94%
-        [  86,   88,   90,   92], // 95%
-        [  87,   89,   91,   93], // 96%
-        [  87,   89,   92,   94], // 97%
-        [  89,   91,   93,   96], // 98%
-        [  93,   94,   96,   97], // 99%
-        [  94,   95,   97,   98], // 100%
+        [0, 0, 2, 11],    // 40%
+        [0, 0, 3, 12],    // 41%
+        [0, 0, 3, 12],    // 42%
+        [0, 1, 4, 13],    // 43%
+        [0, 1, 5, 14],    // 44%
+        [0, 1, 5, 15],    // 45%
+        [0, 1, 6, 16],    // 46%
+        [0, 2, 7, 18],    // 47%
+        [0, 2, 7, 18],    // 48%
+        [0, 3, 9, 20],    // 49%
+        [1, 4, 9, 20],    // 50%
+        [1, 4, 10, 21],   // 51%
+        [1, 4, 11, 23],   // 52%
+        [2, 5, 12, 24],   // 53%
+        [2, 5, 12, 25],   // 54%
+        [2, 6, 13, 26],   // 55%
+        [3, 7, 14, 28],   // 56%
+        [3, 7, 15, 28],   // 57%
+        [4, 8, 16, 30],   // 58%
+        [5, 9, 17, 31],   // 59%
+        [5, 10, 18, 32],  // 60%
+        [6, 11, 20, 35],  // 61%
+        [6, 11, 20, 35],  // 62%
+        [7, 13, 22, 38],  // 63%
+        [8, 14, 23, 39],  // 64%
+        [8, 15, 24, 39],  // 65%
+        [10, 16, 26, 42], // 66%
+        [10, 17, 27, 42], // 67%
+        [12, 19, 29, 44], // 68%
+        [13, 20, 30, 46], // 69%
+        [13, 21, 31, 47], // 70%
+        [16, 23, 33, 48], // 71%
+        [18, 25, 34, 50], // 72%
+        [18, 26, 36, 51], // 73%
+        [19, 28, 38, 53], // 74%
+        [20, 29, 38, 53], // 75%
+        [23, 30, 41, 56], // 76%
+        [24, 33, 43, 57], // 77%
+        [26, 34, 45, 59], // 78%
+        [28, 37, 48, 61], // 79%
+        [30, 37, 48, 62], // 80%
+        [33, 42, 52, 64], // 81%
+        [35, 43, 53, 65], // 82%
+        [38, 47, 56, 68], // 83%
+        [40, 47, 56, 68], // 84%
+        [44, 53, 61, 71], // 85%
+        [45, 53, 62, 73], // 86%
+        [50, 58, 66, 75], // 87%
+        [51, 58, 66, 76], // 88%
+        [57, 63, 71, 79], // 89%
+        [60, 66, 72, 81], // 90%
+        [62, 68, 75, 83], // 91%
+        [70, 74, 80, 85], // 92%
+        [74, 78, 82, 88], // 93%
+        [85, 87, 90, 92], // 94%
+        [86, 88, 90, 92], // 95%
+        [87, 89, 91, 93], // 96%
+        [87, 89, 92, 94], // 97%
+        [89, 91, 93, 96], // 98%
+        [93, 94, 96, 97], // 99%
+        [94, 95, 97, 98], // 100%
     ],
     // cover 0.80
     [
         //  N=5   N=4   N=3   N=2
-        [   0,    1,    4,   13], // 40%
-        [   0,    1,    5,   13], // 41%
-        [   0,    1,    5,   14], // 42%
-        [   0,    2,    6,   15], // 43%
-        [   0,    2,    6,   16], // 44%
-        [   0,    2,    7,   17], // 45%
-        [   1,    3,    8,   18], // 46%
-        [   1,    4,    9,   20], // 47%
-        [   1,    4,    9,   20], // 48%
-        [   2,    5,   11,   22], // 49%
-        [   2,    5,   11,   22], // 50%
-        [   2,    6,   12,   24], // 51%
-        [   3,    6,   13,   25], // 52%
-        [   3,    7,   14,   26], // 53%
-        [   4,    8,   14,   27], // 54%
-        [   4,    8,   15,   28], // 55%
-        [   5,    9,   17,   30], // 56%
-        [   5,    9,   17,   30], // 57%
-        [   6,   11,   19,   32], // 58%
-        [   7,   12,   20,   34], // 59%
-        [   8,   12,   20,   34], // 60%
-        [   9,   14,   22,   37], // 61%
-        [   9,   14,   23,   37], // 62%
-        [  10,   16,   25,   39], // 63%
-        [  11,   17,   26,   41], // 64%
-        [  12,   18,   27,   41], // 65%
-        [  13,   20,   28,   43], // 66%
-        [  14,   21,   30,   45], // 67%
-        [  15,   22,   31,   46], // 68%
-        [  17,   24,   33,   48], // 69%
-        [  17,   24,   34,   48], // 70%
-        [  19,   26,   36,   50], // 71%
-        [  20,   27,   37,   51], // 72%
-        [  21,   29,   39,   53], // 73%
-        [  23,   31,   41,   55], // 74%
-        [  23,   31,   41,   55], // 75%
-        [  26,   34,   44,   58], // 76%
-        [  28,   36,   46,   59], // 77%
-        [  29,   37,   47,   60], // 78%
-        [  34,   41,   50,   62], // 79%
-        [  34,   42,   51,   63], // 80%
-        [  38,   45,   55,   66], // 81%
-        [  39,   46,   55,   67], // 82%
-        [  44,   51,   60,   70], // 83%
-        [  44,   51,   60,   70], // 84%
-        [  49,   56,   64,   73], // 85%
-        [  50,   57,   64,   74], // 86%
-        [  57,   63,   69,   77], // 87%
-        [  58,   64,   70,   78], // 88%
-        [  68,   71,   76,   82], // 89%
-        [  68,   72,   77,   83], // 90%
-        [  75,   79,   81,   85], // 91%
-        [  86,   87,   89,   90], // 92%
-        [  88,   89,   90,   92], // 93%
-        [  90,   91,   92,   93], // 94%
-        [  91,   92,   93,   94], // 95%
-        [  92,   94,   94,   95], // 96%
-        [  93,   94,   95,   96], // 97%
-        [  94,   95,   95,   96], // 98%
-        [  94,   95,   96,   98], // 99%
-        [  95,   96,   97,   98], // 100%
+        [0, 1, 4, 13],    // 40%
+        [0, 1, 5, 13],    // 41%
+        [0, 1, 5, 14],    // 42%
+        [0, 2, 6, 15],    // 43%
+        [0, 2, 6, 16],    // 44%
+        [0, 2, 7, 17],    // 45%
+        [1, 3, 8, 18],    // 46%
+        [1, 4, 9, 20],    // 47%
+        [1, 4, 9, 20],    // 48%
+        [2, 5, 11, 22],   // 49%
+        [2, 5, 11, 22],   // 50%
+        [2, 6, 12, 24],   // 51%
+        [3, 6, 13, 25],   // 52%
+        [3, 7, 14, 26],   // 53%
+        [4, 8, 14, 27],   // 54%
+        [4, 8, 15, 28],   // 55%
+        [5, 9, 17, 30],   // 56%
+        [5, 9, 17, 30],   // 57%
+        [6, 11, 19, 32],  // 58%
+        [7, 12, 20, 34],  // 59%
+        [8, 12, 20, 34],  // 60%
+        [9, 14, 22, 37],  // 61%
+        [9, 14, 23, 37],  // 62%
+        [10, 16, 25, 39], // 63%
+        [11, 17, 26, 41], // 64%
+        [12, 18, 27, 41], // 65%
+        [13, 20, 28, 43], // 66%
+        [14, 21, 30, 45], // 67%
+        [15, 22, 31, 46], // 68%
+        [17, 24, 33, 48], // 69%
+        [17, 24, 34, 48], // 70%
+        [19, 26, 36, 50], // 71%
+        [20, 27, 37, 51], // 72%
+        [21, 29, 39, 53], // 73%
+        [23, 31, 41, 55], // 74%
+        [23, 31, 41, 55], // 75%
+        [26, 34, 44, 58], // 76%
+        [28, 36, 46, 59], // 77%
+        [29, 37, 47, 60], // 78%
+        [34, 41, 50, 62], // 79%
+        [34, 42, 51, 63], // 80%
+        [38, 45, 55, 66], // 81%
+        [39, 46, 55, 67], // 82%
+        [44, 51, 60, 70], // 83%
+        [44, 51, 60, 70], // 84%
+        [49, 56, 64, 73], // 85%
+        [50, 57, 64, 74], // 86%
+        [57, 63, 69, 77], // 87%
+        [58, 64, 70, 78], // 88%
+        [68, 71, 76, 82], // 89%
+        [68, 72, 77, 83], // 90%
+        [75, 79, 81, 85], // 91%
+        [86, 87, 89, 90], // 92%
+        [88, 89, 90, 92], // 93%
+        [90, 91, 92, 93], // 94%
+        [91, 92, 93, 94], // 95%
+        [92, 94, 94, 95], // 96%
+        [93, 94, 95, 96], // 97%
+        [94, 95, 95, 96], // 98%
+        [94, 95, 96, 98], // 99%
+        [95, 96, 97, 98], // 100%
     ],
     // cover 0.75
     [
         //  N=5   N=4   N=3   N=2
-        [   1,    2,    6,   15], // 40%
-        [   1,    3,    7,   16], // 41%
-        [   1,    3,    8,   17], // 42%
-        [   2,    4,    9,   18], // 43%
-        [   2,    4,    9,   19], // 44%
-        [   2,    5,   10,   20], // 45%
-        [   3,    5,   10,   21], // 46%
-        [   3,    6,   12,   22], // 47%
-        [   3,    6,   12,   23], // 48%
-        [   4,    8,   14,   25], // 49%
-        [   4,    8,   14,   25], // 50%
-        [   5,    8,   15,   26], // 51%
-        [   5,    9,   16,   27], // 52%
-        [   6,   10,   17,   29], // 53%
-        [   6,   11,   18,   30], // 54%
-        [   7,   11,   18,   31], // 55%
-        [   8,   12,   20,   32], // 56%
-        [   8,   13,   20,   33], // 57%
-        [  10,   14,   22,   35], // 58%
-        [  10,   15,   23,   37], // 59%
-        [  11,   16,   24,   37], // 60%
-        [  12,   18,   26,   39], // 61%
-        [  13,   18,   26,   40], // 62%
-        [  14,   20,   28,   42], // 63%
-        [  16,   22,   30,   43], // 64%
-        [  16,   22,   31,   44], // 65%
-        [  17,   23,   32,   45], // 66%
-        [  18,   25,   33,   47], // 67%
-        [  19,   26,   35,   48], // 68%
-        [  21,   27,   36,   50], // 69%
-        [  22,   29,   37,   51], // 70%
-        [  24,   30,   39,   52], // 71%
-        [  25,   32,   41,   53], // 72%
-        [  26,   33,   42,   55], // 73%
-        [  29,   35,   44,   57], // 74%
-        [  29,   36,   45,   57], // 75%
-        [  32,   39,   48,   60], // 76%
-        [  34,   41,   50,   61], // 77%
-        [  36,   43,   51,   62], // 78%
-        [  40,   46,   54,   65], // 79%
-        [  40,   46,   54,   65], // 80%
-        [  46,   52,   59,   68], // 81%
-        [  46,   52,   60,   69], // 82%
-        [  53,   59,   65,   73], // 83%
-        [  54,   60,   66,   73], // 84%
-        [  63,   67,   73,   78], // 85%
-        [  68,   71,   75,   79], // 86%
-        [  78,   80,   82,   85], // 87%
-        [  79,   81,   83,   85], // 88%
-        [  83,   85,   86,   87], // 89%
-        [  85,   86,   87,   89], // 90%
-        [  86,   88,   89,   90], // 91%
-        [  88,   89,   90,   91], // 92%
-        [  90,   90,   91,   92], // 93%
-        [  91,   92,   92,   93], // 94%
-        [  92,   93,   94,   94], // 95%
-        [  94,   94,   95,   95], // 96%
-        [  95,   95,   96,   96], // 97%
-        [  95,   96,   97,   97], // 98%
-        [  96,   96,   97,   98], // 99%
-        [  97,   98,   98,   99], // 100%
+        [1, 2, 6, 15],    // 40%
+        [1, 3, 7, 16],    // 41%
+        [1, 3, 8, 17],    // 42%
+        [2, 4, 9, 18],    // 43%
+        [2, 4, 9, 19],    // 44%
+        [2, 5, 10, 20],   // 45%
+        [3, 5, 10, 21],   // 46%
+        [3, 6, 12, 22],   // 47%
+        [3, 6, 12, 23],   // 48%
+        [4, 8, 14, 25],   // 49%
+        [4, 8, 14, 25],   // 50%
+        [5, 8, 15, 26],   // 51%
+        [5, 9, 16, 27],   // 52%
+        [6, 10, 17, 29],  // 53%
+        [6, 11, 18, 30],  // 54%
+        [7, 11, 18, 31],  // 55%
+        [8, 12, 20, 32],  // 56%
+        [8, 13, 20, 33],  // 57%
+        [10, 14, 22, 35], // 58%
+        [10, 15, 23, 37], // 59%
+        [11, 16, 24, 37], // 60%
+        [12, 18, 26, 39], // 61%
+        [13, 18, 26, 40], // 62%
+        [14, 20, 28, 42], // 63%
+        [16, 22, 30, 43], // 64%
+        [16, 22, 31, 44], // 65%
+        [17, 23, 32, 45], // 66%
+        [18, 25, 33, 47], // 67%
+        [19, 26, 35, 48], // 68%
+        [21, 27, 36, 50], // 69%
+        [22, 29, 37, 51], // 70%
+        [24, 30, 39, 52], // 71%
+        [25, 32, 41, 53], // 72%
+        [26, 33, 42, 55], // 73%
+        [29, 35, 44, 57], // 74%
+        [29, 36, 45, 57], // 75%
+        [32, 39, 48, 60], // 76%
+        [34, 41, 50, 61], // 77%
+        [36, 43, 51, 62], // 78%
+        [40, 46, 54, 65], // 79%
+        [40, 46, 54, 65], // 80%
+        [46, 52, 59, 68], // 81%
+        [46, 52, 60, 69], // 82%
+        [53, 59, 65, 73], // 83%
+        [54, 60, 66, 73], // 84%
+        [63, 67, 73, 78], // 85%
+        [68, 71, 75, 79], // 86%
+        [78, 80, 82, 85], // 87%
+        [79, 81, 83, 85], // 88%
+        [83, 85, 86, 87], // 89%
+        [85, 86, 87, 89], // 90%
+        [86, 88, 89, 90], // 91%
+        [88, 89, 90, 91], // 92%
+        [90, 90, 91, 92], // 93%
+        [91, 92, 92, 93], // 94%
+        [92, 93, 94, 94], // 95%
+        [94, 94, 95, 95], // 96%
+        [95, 95, 96, 96], // 97%
+        [95, 96, 97, 97], // 98%
+        [96, 96, 97, 98], // 99%
+        [97, 98, 98, 99], // 100%
     ],
 ];
 

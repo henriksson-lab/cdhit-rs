@@ -5,16 +5,15 @@
 // Rust translation of `cdhit-est.c++`.
 // =============================================================================
 
-use cdhit_rs::cdhit_common::*;
-use cdhit_rs::cdhit_utility::{current_time, print_usage_est};
+use crate::cdhit_common::*;
+use crate::cdhit_utility::{current_time, print_usage_est};
 
 /// `#undef MAX_UAA` / `#define MAX_UAA 4` -- the EST front-ends re-define the alphabet size
 /// before calling `InitNAA`, so nucleotide words are base 4 rather than base 21.
 const MAX_UAA_EST: i32 = 4;
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
-fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+pub fn main(argv: &[String]) {
     let argc = argv.len();
 
     let mut options = Options::default();
@@ -37,7 +36,7 @@ fn main() {
     let num_procs = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(1);
-    if !options.set_options(&argv, false, true, num_procs, &mut mat, &mut alphabet) {
+    if !options.set_options(argv, false, true, num_procs, &mut mat, &mut alphabet) {
         print_usage_est(&argv[0]);
     }
     options.validate();

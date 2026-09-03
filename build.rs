@@ -21,7 +21,10 @@ fn main() {
         d,
         y
     );
-    println!("cargo:rustc-env=CDHIT_BUILD_TIME={:02}:{:02}:{:02}", hh, mm, ss);
+    println!(
+        "cargo:rustc-env=CDHIT_BUILD_TIME={:02}:{:02}:{:02}",
+        hh, mm, ss
+    );
 }
 
 /// Howard Hinnant's `civil_from_days`, plus the time of day. UTC.

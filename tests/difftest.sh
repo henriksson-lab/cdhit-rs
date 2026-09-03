@@ -121,6 +121,32 @@ est "$DATA/dna_dup.fna"   "est_dup"       -c 0.98 -T 1
 est "$DATA/dna_dup.fna"   "est_dup_trim"  -c 0.95 -cx 100 -T 1
 est "$DATA/dna_small.fna" "est_dist"      -D 0.05 -T 1
 
+# ---- long N50: ComputeTableLimits overflows its `int` expression ----------
+# `500*max_len + 500000*typical_len + 50000000` is int arithmetic upstream and wraps
+# negative once the N50 passes ~4294. `(size_t)` of that negative double is ~1.8e19, i.e.
+# effectively no limit; a saturating conversion would give 0 and spin the block loop in
+# DoClustering forever. Check with: the run prints
+# "Max number of word counting entries: 18446744072467088320".
+for c in 0.90 0.95 0.99; do
+  est "$DATA/dna_longn50.fna" "est_longn50_c$c" -c $c -M 0 -T 1
+done
+est "$DATA/dna_longn50.fna" "est_longn50_mem"  -c 0.95 -M 200 -T 1
+est "$DATA/dna_longn50.fna" "est_longn50_n8"   -c 0.95 -n 8 -M 0 -T 1
+est "$DATA/dna_longn50.fna" "est_longn50_dist" -D 0.05 -M 0 -T 1
+p454 "$DATA/dna_longn50.fna" "454_longn50"     -c 0.98 -M 0 -T 1
+est2d "$DATA/dna_small.fna" "$DATA/dna_longn50.fna" "est2d_longn50" -c 0.9 -M 0 -T 1
+# Guard the guard: if the N50 ever drops back under the overflow point these cases stop
+# testing anything.
+entries=$("$RS/cd-hit-est" -i "$DATA/dna_longn50.fna" -o "$WORK/n50" -c 0.95 -M 0 -T 1 2>&1 |
+            sed -n 's/^Max number of word counting entries: //p')
+# (a bare `-gt` would overflow bash's own signed 64-bit arithmetic here)
+if [ "${#entries}" -ge 19 ]; then
+  pass=$((pass+1))
+else
+  echo "FAIL longn50_guard: max_entries=$entries, expected the overflowed ~1.8e19"
+  fail=$((fail+1)); failed+=("longn50_guard")
+fi
+
 # ---- cd-hit-2d / cd-hit-est-2d -------------------------------------------
 for c in 0.80 0.90 0.95 0.99; do
   est2d "$DATA/dna_small.fna" "$DATA/dna_mixed.fna" "est2d_c$c" -c $c -T 1
@@ -181,6 +207,42 @@ prot "$DATA/prot_mixed.faa" "aa_mem200"   -c 0.9 -M 200 -T 1
 prot "$DATA/prot_mixed.faa" "aa_mem0"     -c 0.9 -M 0 -T 1
 prot "$DATA/prot_mixed.faa" "aa_unmatch"  -c 0.9 -uL 0.3 -uS 0.3 -T 1
 prot "$DATA/prot_small.faa" "aa_dist"     -D 0.1 -T 1
+
+# ---- coverage / length options driven outside [0,1] -----------------------
+# Panaroo runs cd-hit with -aS/-AS/-AL/-S far out of range. `ControlShortCoverage` then
+# evaluates `(int)(len * 99999999.0)`, which does not fit in an int: on x86-64 the C++
+# lands on INT_MIN and the very next line overwrites it, while a saturating conversion
+# would keep INT_MAX and reject every alignment. Same story for -aL and for a tiny -s in
+# `upper_bound_length_rep`.
+PANAROO="-s None -aL 0.0 -AL 99999999 -aS 99999999 -AS 99999999 -M 0 -d 999 -g 1 -n 2"
+for c in 0.70 0.80 0.90 0.95 0.99; do
+  prot "$DATA/prot_pair.faa"    "aa_panaroo_pair_c$c" -c $c $PANAROO -T 1
+  prot "$DATA/prot_panaroo.faa" "aa_panaroo_c$c"      -c $c $PANAROO -T 1
+done
+prot "$DATA/prot_mixed.faa" "aa_aS_huge"  -c 0.9 -aS 99999999 -AS 99999999 -T 1
+prot "$DATA/prot_mixed.faa" "aa_aL_huge"  -c 0.9 -aL 99999999 -AL 99999999 -T 1
+prot "$DATA/prot_mixed.faa" "aa_G0_aS_huge" -c 0.9 -G 0 -aS 99999999 -AS 99999999 -T 1
+prot "$DATA/prot_mixed.faa" "aa_s_tiny"   -c 0.9 -s 0.000000001 -T 1
+prot "$DATA/prot_mixed.faa" "aa_aL_tiny"  -c 0.9 -aL 0.000000001 -T 1
+# `upper_bound_length_rep` divides in double precision, not float: `-s 0.001` on a
+# 333aa sequence must give 333000, not 332999.
+for sm in 0.001 0.002 0.008 0.016; do
+  prot "$DATA/prot_mixed.faa" "aa_s_$sm"  -c 0.9 -s $sm -T 1
+  est  "$DATA/dna_mixed.fna"  "est_s_$sm" -c 0.9 -s $sm -T 1
+done
+est  "$DATA/dna_mixed.fna"  "est_aS_huge" -c 0.9 -aS 99999999 -AS 99999999 -T 1
+est  "$DATA/dna_mixed.fna"  "est_aL_huge" -c 0.9 -aL 99999999 -AL 99999999 -T 1
+est  "$DATA/dna_mixed.fna"  "est_s_tiny"  -c 0.9 -s 0.000000001 -T 1
+
+# ---- -D distance mode: `ComputeRequiredBases` takes its own branch ---------
+for d in 0.01 0.02 0.05 0.10 0.20; do
+  prot "$DATA/prot_small.faa" "aa_dist_$d"   -D $d -T 1
+  prot "$DATA/prot_mixed.faa" "aa_distm_$d"  -D $d -T 1
+  est  "$DATA/dna_small.fna"  "est_dist_$d"  -D $d -T 1
+  est  "$DATA/edge_short.fna" "est_dists_$d" -D $d -T 1
+done
+prot "$DATA/prot_small.faa" "aa_dist_n2"  -D 0.05 -n 2 -T 1
+prot "$DATA/prot_small.faa" "aa_dist_g1"  -D 0.05 -g 1 -T 1
 
 # ---- awkward inputs -------------------------------------------------------
 for f in empty one no_trailing_nl crlf blank_lines lowercase dup_names long_header \
@@ -243,6 +305,35 @@ thread_case cd-hit-est "$DATA/dna_mixed.fna" "thr_est"      -c 0.90
 thread_case cd-hit-est "$DATA/dna_dup.fna"   "thr_est_dup"  -c 0.95
 thread_case cd-hit     "$DATA/prot_mixed.faa" "thr_aa"      -c 0.90
 thread_case cd-hit-454 "$DATA/dna_dup.fna"   "thr_454"      -c 0.98
+thread_case cd-hit-est "$DATA/dna_longn50.fna" "thr_longn50" -c 0.95 -M 0
+
+# The cases above all fit in a single word table, and `screen_against_table` -- the only
+# parallel code in 1D clustering -- covers the sequences *after* the current block. With
+# one block that range is empty, so those cases never execute the threaded path at all.
+# These force several blocks by squeezing -M just above the memory floor, so the workers
+# actually run. Check with: the run prints one "comparing sequences from" line per block.
+thread_case cd-hit-est "$DATA/dna_mixed.fna"  "thr_est_mb"  -c 0.90 -n 8 -M 14
+thread_case cd-hit-est "$DATA/dna_dup.fna"    "thr_dup_mb"  -c 0.95 -n 8 -M 14
+thread_case cd-hit     "$DATA/prot_mixed.faa" "thr_aa_mb"   -c 0.90 -n 4 -M 14
+thread_case cd-hit-est "$DATA/dna_small.fna"  "thr_small_mb" -c 0.95 -n 8 -M 14
+
+# Guard the guard: if a change to the memory accounting moves the block boundaries, the
+# cases above would silently go back to being single-block and stop testing anything.
+for spec in "cd-hit-est|$DATA/dna_mixed.fna|-c 0.90 -n 8 -M 14" \
+            "cd-hit-est|$DATA/dna_dup.fna|-c 0.95 -n 8 -M 14" \
+            "cd-hit|$DATA/prot_mixed.faa|-c 0.90 -n 4 -M 14" \
+            "cd-hit-est|$DATA/dna_small.fna|-c 0.95 -n 8 -M 14"; do
+  prog="${spec%%|*}"; rest="${spec#*|}"; input="${rest%%|*}"; opts="${rest#*|}"
+  blocks=$("$RS/$prog" -i "$input" -o "$WORK/blk" $opts -T 1 2>&1 |
+             grep -c "comparing sequences from")
+  if [ "$blocks" -gt 1 ]; then
+    pass=$((pass+1))
+  else
+    echo "FAIL multiblock_guard $prog $(basename "$input"): $blocks block(s), expected >1"
+    echo "     the -T cases for this input are no longer exercising the parallel path"
+    fail=$((fail+1)); failed+=("multiblock_guard_$prog")
+  fi
+done
 
 # 2D under threads, likewise against the C++ -T 1 output
 for t in 2 4 8; do

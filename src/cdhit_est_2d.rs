@@ -5,15 +5,14 @@
 // Rust translation of `cdhit-est-2d.c++`.
 // =============================================================================
 
-use cdhit_rs::cdhit_common::*;
-use cdhit_rs::cdhit_utility::{current_time, print_usage_est_2d};
+use crate::cdhit_common::*;
+use crate::cdhit_utility::{current_time, print_usage_est_2d};
 
 /// `#undef MAX_UAA` / `#define MAX_UAA 4`: nucleotide words are base 4, not base 21.
 const MAX_UAA_EST: i32 = 4;
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
-fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+pub fn main(argv: &[String]) {
     let argc = argv.len();
 
     let mut options = Options::default();
@@ -37,7 +36,7 @@ fn main() {
     let num_procs = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(1);
-    if !options.set_options(&argv, true, true, num_procs, &mut mat, &mut alphabet) {
+    if !options.set_options(argv, true, true, num_procs, &mut mat, &mut alphabet) {
         print_usage_est_2d(&argv[0]);
     }
     options.validate();

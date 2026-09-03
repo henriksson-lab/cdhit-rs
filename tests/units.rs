@@ -152,7 +152,10 @@ fn comp_word_index_is_an_involution() {
     assert_eq!(idx.len(), 1024);
     for (code, &comp) in idx.iter().enumerate() {
         assert!((comp as usize) < naan, "code {code} maps out of range");
-        assert_eq!(idx[comp as usize] as usize, code, "not an involution at {code}");
+        assert_eq!(
+            idx[comp as usize] as usize, code,
+            "not an involution at {code}"
+        );
     }
     // AAAAA (all zeros) <-> TTTTT (all threes)
     assert_eq!(idx[0] as usize, naan - 1);
@@ -257,13 +260,31 @@ fn upper_bound_length_rep_combines_options() {
 #[test]
 fn cal_aax_cutoff_tolerance_zero_is_closed_form() {
     let (mut a1, mut a2, mut an) = (0.0, 0.0, 0.0);
-    cal_aax_cutoff(&mut a1, &mut a2, &mut an, 0.9, 0, NAA_STAT_START_PERCENT, &NAA_STAT, 5);
+    cal_aax_cutoff(
+        &mut a1,
+        &mut a2,
+        &mut an,
+        0.9,
+        0,
+        NAA_STAT_START_PERCENT,
+        &NAA_STAT,
+        5,
+    );
     assert!((a1 - 0.9).abs() < 1e-12);
     assert!((a2 - 0.8).abs() < 1e-12); // 1 - (1-0.9)*2
     assert!((an - 0.5).abs() < 1e-12); // 1 - (1-0.9)*5
 
     let (mut b1, mut b2, mut bn) = (0.0, 0.0, 0.0);
-    cal_aax_cutoff(&mut b1, &mut b2, &mut bn, 0.9, 2, NAA_STAT_START_PERCENT, &NAA_STAT, 5);
+    cal_aax_cutoff(
+        &mut b1,
+        &mut b2,
+        &mut bn,
+        0.9,
+        2,
+        NAA_STAT_START_PERCENT,
+        &NAA_STAT,
+        5,
+    );
     assert!((b1 - a1).abs() < 1e-12, "aa1 is never adjusted");
     assert!(b2 >= a2, "the table can only raise aa2");
     assert!(bn >= an, "the table can only raise aan");
@@ -283,7 +304,7 @@ fn naa_stat_table_shape() {
     assert_eq!(NAA_STAT[2][60], [94, 95, 97, 98]); // cover 0.90
     assert_eq!(NAA_STAT[3][60], [95, 96, 97, 98]); // cover 0.80
     assert_eq!(NAA_STAT[4][60], [97, 98, 98, 99]); // cover 0.75
-    // and the 40% row, where a 5-mer requirement has not yet appeared
+                                                   // and the 40% row, where a 5-mer requirement has not yet appeared
     assert_eq!(NAA_STAT[0][0], [0, 0, 0, 7]);
     // within a tolerance, the requirement rises with identity
     for (t, block) in NAA_STAT.iter().enumerate() {
@@ -326,4 +347,234 @@ fn convert_bases_encodes_in_place() {
     s.assign(b"ACGTN");
     s.convert_bases(&a);
     assert_eq!(s.data, vec![0, 1, 2, 3, 4]);
+}
+
+// ---------------------------------------------------------------------------
+// C `(int)` conversion of out-of-range floating values
+// ---------------------------------------------------------------------------
+
+/// Casting a `double` whose truncated value does not fit in an `int` is UB in C++, but on
+/// x86-64 every such cast compiles to `cvttsd2si`, which yields the "integer indefinite"
+/// value `INT_MIN`. Rust's `as i32` saturates towards `INT_MAX` instead, so the
+/// translation needs `cvt_int` wherever the C++ writes `(int)` / `int(...)`.
+#[test]
+fn cvt_int_returns_int_min_out_of_range() {
+    // in range: plain truncation towards zero
+    assert_eq!(cvt_int(0.0), 0);
+    assert_eq!(cvt_int(3.9), 3);
+    assert_eq!(cvt_int(-3.9), -3);
+    assert_eq!(cvt_int(2147483647.0), i32::MAX);
+    assert_eq!(cvt_int(2147483647.5), i32::MAX); // truncates back into range
+    assert_eq!(cvt_int(-2147483648.0), i32::MIN);
+    assert_eq!(cvt_int(-2147483648.5), i32::MIN);
+    // out of range, and NaN: the x86-64 indefinite value, never a saturated INT_MAX
+    assert_eq!(cvt_int(2147483648.0), i32::MIN);
+    assert_eq!(cvt_int(-2147483649.0), i32::MIN);
+    assert_eq!(cvt_int(325.0 * 99999999.0), i32::MIN);
+    assert_eq!(cvt_int(1e30), i32::MIN);
+    assert_eq!(cvt_int(-1e30), i32::MIN);
+    assert_eq!(cvt_int(f64::NAN), i32::MIN);
+    assert_eq!(cvt_int(f64::INFINITY), i32::MIN);
+    assert_eq!(cvt_int(f64::NEG_INFINITY), i32::MIN);
+}
+
+/// The 64-bit sibling. `Options::ComputeTableLimits` casts to `size_t`, and the value it
+/// casts is routinely negative: `500*max_len + 500000*typical_len + 50000000` is `int`
+/// arithmetic upstream and wraps once the N50 passes ~4294. `(size_t)` of that negative
+/// double is a near-`u64::MAX` limit -- effectively "no limit" -- whereas Rust's
+/// `as usize` saturates to 0, which stalls the block loop in `DoClustering` forever.
+#[test]
+fn cvt_size_wraps_negative_like_a_c_size_t_cast() {
+    assert_eq!(cvt_size(0.0), 0);
+    assert_eq!(cvt_size(3.9), 3);
+    assert_eq!(cvt_size(-1.0), usize::MAX);
+    assert_eq!(cvt_size(-3.9), usize::MAX - 2); // truncation happens first
+
+    // The worked case: 60 contigs of 6000 bp at -T 1 (scale == 1.0).
+    let max_len = 6000i32;
+    let typical_len = 6000i32;
+    let inner = (500i32.wrapping_mul(max_len))
+        .wrapping_add(500000i32.wrapping_mul(typical_len))
+        .wrapping_add(50000000);
+    assert_eq!(inner, -1241967296);
+    assert_eq!(cvt_size(1.0 * inner as f64), 18446744072467584320);
+    assert_ne!(cvt_size(1.0 * inner as f64), 0);
+
+    // Out of range and NaN land on the indefinite value, as `cvttsd2si` does.
+    assert_eq!(cvt_size(1e30), i64::MIN as usize);
+    assert_eq!(cvt_size(f64::NAN), i64::MIN as usize);
+    assert_eq!(cvt_size(f64::NEG_INFINITY), i64::MIN as usize);
+}
+
+/// `WorkingParam::ControlShortCoverage`. Panaroo runs cd-hit with `-aS 99999999`, which
+/// makes `(int)(double(len) * options.short_coverage)` overflow; upstream's `INT_MIN` is
+/// then immediately replaced by `len - options.short_control` and finally clamped up to
+/// `options.min_control`, leaving `min_aln_lenS == 0`. A saturating conversion would
+/// leave `INT_MAX` there and the `aln_cover_flag` gate in `CheckOneAA` would then reject
+/// every candidate. Values below come from a C++ probe linked against `cdhit-common.o`.
+#[test]
+fn control_short_coverage_matches_c_on_overflow() {
+    // (len, short_coverage, short_control, min_control, global_identity)
+    //   -> (aln_cover_flag, min_aln_lenS, len_eff)
+    /// `(len, short_coverage, short_control, min_control, global_identity)` and the
+    /// expected `(aln_cover_flag, min_aln_len_s, len_eff)`.
+    type Case = (i32, f64, i32, i32, bool, i32, i32, i32);
+    let cases: &[Case] = &[
+        (333, 99999999.0, 99999999, 0, true, 1, 0, 333),
+        (325, 99999999.0, 99999999, 0, true, 1, 0, 325),
+        (333, 99999999.0, 99999999, 0, false, 1, 0, 0),
+        (100, 99999999.0, 10, 0, true, 1, 90, 100),
+        (100, 0.8, 99999999, 0, true, 1, 80, 100),
+        (100, 0.8, 10, 0, true, 1, 90, 100),
+        (100, 0.0, 99999999, 5, true, 1, 5, 100),
+        (100, 1e12, 99999999, 0, true, 1, 0, 100),
+    ];
+    for &(len, a_s, a_s_aa, minc, gi, flag, mins, leff) in cases {
+        let o = Options {
+            short_coverage: a_s,
+            short_control: a_s_aa,
+            min_control: minc,
+            global_identity: gi,
+            ..Default::default()
+        };
+        let mut p = WorkingParam::new(0.8, 0.6, 0.6);
+        p.control_short_coverage(len, &o);
+        assert_eq!(
+            (p.aln_cover_flag, p.min_aln_len_s, p.len_eff),
+            (flag, mins, leff),
+            "ControlShortCoverage(len={len}, -aS {a_s}, -AS {a_s_aa}, -l {minc}, -G {})",
+            gi as i32
+        );
+    }
+}
+
+/// `WorkingParam::ControlLongCoverage`, same overflow on the `-aL` side.
+#[test]
+fn control_long_coverage_matches_c_on_overflow() {
+    // (len2, long_coverage, long_control, min_control) -> min_aln_lenL
+    let cases: &[(i32, f64, i32, i32, i32)] = &[
+        (333, 99999999.0, 99999999, 0, 0),
+        (333, 0.0, 99999999, 0, 0),
+        (333, 0.7, 60, 0, 273),
+        (333, 1e12, 10, 0, 323),
+    ];
+    for &(len2, a_l, a_l_aa, minc, want) in cases {
+        let o = Options {
+            short_coverage: 1.0, // force aln_cover_flag on
+            short_control: 0,
+            min_control: minc,
+            long_coverage: a_l,
+            long_control: a_l_aa,
+            ..Default::default()
+        };
+        let mut p = WorkingParam::new(0.8, 0.6, 0.6);
+        p.control_short_coverage(len2, &o);
+        p.control_long_coverage(len2, &o);
+        assert_eq!(
+            p.min_aln_len_l, want,
+            "ControlLongCoverage(len2={len2}, -aL {a_l}, -AL {a_l_aa})"
+        );
+    }
+}
+
+/// `upper_bound_length_rep`. Two things at once: the division `((float) len) / r1` is done
+/// in *double* precision because `r1` is a `double`, and a tiny `-s` / `-aL` overflows the
+/// `(int)` cast to `INT_MIN` -- which then survives, because `len + a2` is not smaller.
+#[test]
+fn upper_bound_length_rep_matches_c() {
+    // (len, opt_s, opt_S, opt_aL, opt_AL) -> len_upper_bound
+    let cases: &[(i32, f64, i32, f64, i32, i32)] = &[
+        (333, 0.0, 999999, 0.0, 99999999, 1000332),
+        (333, 0.8, 60, 0.0, 99999999, 393),
+        (333, 1e-9, 999999, 0.0, 99999999, i32::MIN),
+        (333, 0.0, 999999, 1e-9, 99999999, i32::MIN),
+        (333, 0.9, 999999, 0.0, 99999999, 370),
+        (100, 0.33, 999999, 0.0, 99999999, 303),
+        (12345, 0.7, 999999, 0.0, 99999999, 17635),
+        (333, 1e-6, 999999, 0.0, 99999999, 1000332),
+        // these separate the double division from a float one: `(float) len` is promoted
+        // back to double before dividing, so `1.0f / 0.001` is 1000, not 999.
+        (1, 0.001, 999999, 0.0, 99999999, 1000),
+        (3, 0.001, 999999, 0.0, 99999999, 3000),
+        (7, 0.002, 999999, 0.0, 99999999, 3500),
+        (125, 0.008, 999999, 0.0, 99999999, 15625),
+        (333, 0.016, 999999, 0.0, 99999999, 20812),
+        (500, 0.001, 999999, 0.0, 99999999, 500000),
+    ];
+    for &(len, s, s_aa, al, al_aa, want) in cases {
+        assert_eq!(
+            upper_bound_length_rep_raw(len, s, s_aa, al, al_aa),
+            want,
+            "upper_bound_length_rep({len}, {s}, {s_aa}, {al}, {al_aa})"
+        );
+    }
+}
+
+/// The `-D` (distance) branch of `WorkingParam::ComputeRequiredBases`.
+///
+/// Upstream (`cdhit-common.c++:2801`) reads
+/// `required_aa1 = required_aas = (ks2 < ks ? ks2 : ks);` -- `ks` is `len_eff - ss + 1`.
+/// The translation used `k` (`min(len_eff, invd)`) instead, which is one too large
+/// whenever `invd >= len_eff + 2`. `k` is computed and never read in the C++ too.
+/// Reference values come from a C++ probe linked against `cdhit-common.o`.
+#[test]
+fn compute_required_bases_distance_branch_matches_c() {
+    // (len_eff, distance_thd, NAA) -> (required_aa1, required_aas, required_aan)
+    let cases: &[(i32, f64, i32, i32, i32, i32)] = &[
+        (5, 0.1, 2, 4, 4, 4),
+        (5, 0.05, 5, 4, 4, 1),
+        (10, 0.05, 4, 9, 9, 7),
+        (10, 0.02, 2, 9, 9, 9),
+        (20, 0.02, 3, 19, 19, 18),
+        (20, 0.01, 5, 19, 19, 16),
+        (50, 0.01, 2, 49, 49, 49),
+        (50, 0.02, 4, 47, 47, 45),
+        (97, 0.01, 2, 96, 96, 96),
+        (98, 0.01, 2, 97, 97, 97),
+        (99, 0.01, 2, 97, 97, 97),
+        (100, 0.01, 2, 97, 97, 97),
+        (100, 0.01, 5, 97, 97, 94),
+        (333, 0.001, 4, 332, 332, 330),
+        (1000, 0.001, 2, 997, 997, 997),
+        (20, 0.3, 2, 1, 1, 1),
+        (50, 0.1, 3, 7, 7, 6),
+        (333, 0.05, 2, 17, 17, 17),
+        (1000, 0.0, 2, 999, 999, 999),
+        (5, 0.5, 2, 1, 1, 1),
+    ];
+    let mut differs = 0;
+    for &(len_eff, d, naa, aa1, aas, aan) in cases {
+        let o = Options {
+            use_distance: true,
+            distance_thd: d,
+            band_width: 20,
+            naa,
+            cluster_thd: 0.9,
+            ..Default::default()
+        };
+        let mut p = WorkingParam::new(0.8, 0.6, 0.6);
+        p.len_eff = len_eff;
+        p.compute_required_bases(naa, 2, &o);
+        assert_eq!(
+            (p.required_aa1, p.required_aas, p.required_aan),
+            (aa1, aas, aan),
+            "ComputeRequiredBases(len_eff={len_eff}, -D {d}, NAA={naa})"
+        );
+        // the old `k` spelling: min(ks2, min(len_eff, invd)) instead of min(ks2, ks)
+        let invd = cvt_int(1.0 / (d + 1e-9));
+        let k = len_eff.min(invd);
+        let ks2 = invd - 2;
+        let mut buggy = if ks2 < k { ks2 } else { k };
+        if buggy <= 0 {
+            buggy = 1;
+        }
+        if buggy != aa1 {
+            differs += 1;
+        }
+    }
+    // the table has to actually separate the two spellings, or it pins nothing
+    assert!(
+        differs > 0,
+        "no case in this table distinguishes `ks` from `k`"
+    );
 }

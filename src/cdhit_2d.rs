@@ -5,12 +5,11 @@
 // Rust translation of `cdhit-2d.c++`.
 // =============================================================================
 
-use cdhit_rs::cdhit_common::*;
-use cdhit_rs::cdhit_utility::{current_time, print_usage_2d};
+use crate::cdhit_common::*;
+use crate::cdhit_utility::{current_time, print_usage_2d};
 
 ////////////////////////////////////  MAIN /////////////////////////////////////
-fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+pub fn main(argv: &[String]) {
     let argc = argv.len();
 
     let mut options = Options::default();
@@ -28,7 +27,7 @@ fn main() {
     let num_procs = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(1);
-    if !options.set_options(&argv, true, false, num_procs, &mut mat, &mut alphabet) {
+    if !options.set_options(argv, true, false, num_procs, &mut mat, &mut alphabet) {
         print_usage_2d(&argv[0]);
     }
     options.validate();

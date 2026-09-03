@@ -125,4 +125,20 @@ def write_fq(name, recs):
 write_fq('pe_R1.fq', r1)
 write_fq('pe_R2.fq', r2)
 
+# ---- dna_longn50: long contigs, so that the N50 passes the point where
+# `Options::ComputeTableLimits` overflows its `int` expression
+# `500*max_len + 500000*typical_len + 50000000`. That happens once typical_len (the N50)
+# exceeds ~4294; upstream's `(size_t)` cast of the resulting negative double yields a
+# max_entries of ~1.8e19 (no limit), which is the behaviour the port has to match. Used
+# with -M 0 so the max_memory branch does not overwrite it.
+rng = random.Random(71)
+recs = []
+for fam in range(12):
+    base = ''.join(rng.choice(DNA) for _ in range(6000))
+    for i in range(5):
+        recs.append(('g%d_%d contig' % (fam, i),
+                     mutate(base, rng.uniform(0, .08), DNA, rng, indel=0.002)))
+rng.shuffle(recs)
+write('dna_longn50.fna', recs)
+
 print('wrote', sorted(os.listdir(OUT)))
