@@ -12,18 +12,13 @@ thread count.
 
 ## CLI
 
-All six C++ programs are translated. Upstream ships them as six executables; here they are
-subcommands of one binary, which is the only change to how you invoke them:
+All six C++ programs are translated and available as subcommands:
 
 ```
 cdhit est -i in.fna -o out -c 0.95        # the short form
 cdhit cd-hit-est -i in.fna -o out -c 0.95 # the upstream name also works
 ln -s cdhit cd-hit-est && ./cd-hit-est …  # and so does a symlink, for existing scripts
 ```
-
-`cdhit` on its own lists the commands; `cdhit <command> -h` gives that command's options.
-Each command is the faithful translation of the corresponding `main`, unchanged.
-
 
 | command | short form | from | what it does |
 | --- | --- | --- | --- |
@@ -99,27 +94,11 @@ compatible with. See `NAMING.md`.
 
 ## Licence
 
-CD-HIT 4.8.1 is under the GNU General Public License, version 2. `cdhit/license.txt` is the
-GPLv2 text verbatim, and the user's guide (`cdhit/doc/cdhit-user-guide.wiki`, "Installation")
-says "It can be copied under the GNU General Public License version 2 (GPLv2)". Neither adds
-an "or any later version" clause.
-
-GPLv2 section 0 counts a translation as a modification — "either verbatim or with
-modifications and/or translated into another language" — so this port is a derivative work of
-CD-HIT and is distributed under the same licence, GPLv2. It cannot be relicensed. `LICENSE`
-at the root is a copy of `cdhit/license.txt`.
-
-CD-HIT was written by Weizhong Li (UCSD, San Diego Supercomputer Center) in Adam Godzik's lab
-at the Burnham Institute, and modified by Limin Fu (Center for Research in Biological Systems,
-UCSD); the file headers in `cdhit/` name them. The algorithm, the data structures and the
-output format are theirs. Questions about CD-HIT itself go to liwz@sdsc.edu or
-https://github.com/weizhongli/cdhit, not here.
+GNU General Public License, version 2
 
 ## Citation
 
-Cite the original papers, not this port. These are the three the C++ prints in its `-h` text
-(`cd_hit_ref1`, `cd_hit_ref2`, `cd_hit_ref3` in `src/cdhit_utility.rs`), and they are
-reproduced there verbatim:
+Please cite the original software:
 
 1. Weizhong Li & Adam Godzik. CD-HIT: a fast program for clustering and comparing large sets
    of protein or nucleotide sequences. Bioinformatics (2006) 22:1658-1659.
@@ -128,7 +107,10 @@ reproduced there verbatim:
 3. Beifang Niu, Limin Fu, Shulei Sun & Weizhong Li. Artificial and natural duplicates in
    pyrosequencing reads of metagenomic data. BMC Bioinformatics (2010) 11:187.
 
-(1) is the original method; (2) is the 4.x version this is translated from; (3) is the
-duplicate detection in pyrosequencing reads that `cd-hit-454` implements. `cd-hit`,
-`cd-hit-2d`, `cd-hit-est` and `cd-hit-est-2d` print (1) and (2); `cd-hit-454` prints all
-three; `cd-hit-div` prints none.
+If you use our translation, we recommend that you also cite the precise version you use. If you link to [crates.io](http://crates.io), you can cite the version number;
+but if you link to our Git repository, for reproducibility, it is better that you provide the URL to the repository and the git hash (Github lists it high up on the page as 7 letters, under the Code button, e.g. '21751cd')
+
+In addition, we appreciate if you cite the paper below describing the translation approach. If for some reason you struggle with journal citation limits, please prioritizing citing the original software over our translation paper.
+
+> Johan Henriksson. Static analysis-guided agentic AI translation enables Rust as a full stack bioinformatics language. arXiv:2608.13029, 2026. https://doi.org/10.48550/arXiv.2608.13029
+
