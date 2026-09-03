@@ -1,1 +1,4 @@
 target/
+# Not checked in: this crate is used as a library, where a committed lock file is ignored
+# by dependents. CI therefore cannot pass --locked.
+Cargo.lock

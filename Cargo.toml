@@ -2,6 +2,10 @@
 name = "cdhit-rs"
 version = "0.1.0"
 edition = "2021"
+# MSRV-aware resolution: prefer dependency versions whose own rust-version fits ours.
+# Without this, and without a tracked lock file, the msrv job would resolve to whatever is
+# newest and fail on a dependency's MSRV rather than on ours.
+resolver = "3"
 # The vectorised diagonal test uses AVX-512 intrinsics, stable since 1.89.
 rust-version = "1.89"
 license = "GPL-2.0-only"

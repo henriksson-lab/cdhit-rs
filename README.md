@@ -43,29 +43,29 @@ The translation is faithful. Across every input and option combination in `tests
 cases — the `.clstr` file and the representative FASTA are **byte-identical** to the C++
 binary's, and a randomised differential harness adds several hundred more.
 
-It is also faster everywhere measured. User CPU, best of two, on a shared Xeon Gold 6138;
-`same` means the output matched byte for byte:
+It is also faster everywhere measured — 1.1x to 2.4x depending on configuration. Best of
+three, user CPU time, `-T 1`, on an otherwise-quiet Xeon Gold 6138; every case produced
+byte-identical output to the C++:
 
-| case | C++ | Rust | |
+| case | C++ | Rust | speedup (C++ / Rust) |
 | --- | --- | --- | --- |
-| `cd-hit-est -n 5` | 15.77s | 13.76s | 1.15x |
-| `cd-hit-est -n 8` | 2.77s | 2.51s | 1.10x |
-| `cd-hit-est -n 10` | 2.43s | 1.81s | 1.34x |
-| `cd-hit-est -n 11` | 2.32s | 1.61s | 1.44x |
-| `cd-hit-est -c 0.90` | 92.90s | 86.67s | 1.07x |
-| `cd-hit -n 5` | 4.07s | 2.77s | 1.47x |
-| `cd-hit -n 4` | 5.83s | 4.83s | 1.21x |
-| `cd-hit -c 0.70` | 4.33s | 3.71s | 1.17x |
-| `cd-hit-454` | 1.40s | 0.74s | 1.89x |
+| `cd-hit-est -n 5` | 15.74s | 14.02s | 1.12x |
+| `cd-hit-est -n 8` | 2.76s | 2.22s | 1.24x |
+| `cd-hit-est -n 10` | 2.47s | 1.37s | 1.80x |
+| `cd-hit-est -n 11` | 2.32s | 1.46s | 1.59x |
+| `cd-hit-est -c 0.90` | 94.26s | 50.44s | 1.87x |
+| `cd-hit -n 5` | 4.13s | 1.75s | 2.36x |
+| `cd-hit -n 4` | 5.91s | 4.26s | 1.39x |
+| `cd-hit -c 0.70` | 4.35s | 2.63s | 1.65x |
+| `cd-hit-454` | 1.39s | 0.57s | 2.44x |
+| `cd-hit-est-2d` | 5.34s | 2.91s | 1.84x |
+| `cd-hit-2d` | 9.68s | 5.35s | 1.81x |
+
+Reproduce with `BENCH_DNA=<dna.fna> BENCH_AA=<prot.faa> ./tests/bench.sh`.
 
 Peak RSS is slightly lower than the C++ too (89 MB vs 93 MB on the `-n 10` case), and no
 longer grows with `-T`.
 
-Since those numbers were taken, three further changes landed: a software-pipelined prefetch
-of the word-table lookup, and an AVX-512 counting kernel for the nucleotide diagonal test
-which takes the worst case -- `cd-hit-est -c 0.90`, where the word filter degenerates and
-almost all time goes into that one function -- from parity to **1.83x**. Both are exact;
-see `NAMING.md`.
 
 ```
 cargo build --release

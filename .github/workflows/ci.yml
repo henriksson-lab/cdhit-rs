@@ -36,9 +36,9 @@ jobs:
         with:
           components: clippy
 
-      # Caches ~/.cargo (registry, git checkouts) and ./target, keyed on the OS, the
-      # rustc version and Cargo.lock. Saves only on the default branch, so PRs cannot
-      # poison it.
+      # Caches ~/.cargo (registry, git checkouts) and ./target. Cargo.lock is not tracked
+      # (see .gitignore), so the cache key falls back to hashing the manifests, and no
+      # step can pass --locked.
       - uses: Swatinem/rust-cache@v2
 
       # The host triple decides which of the two code paths gets compiled; worth having
@@ -51,16 +51,16 @@ jobs:
       # Windows runner what catches it in the `GetProcessTimes` path. Running this only
       # on Linux would have missed four warnings on aarch64.
       - name: clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release
 
       # Debug profile on purpose: the unit tests cover C-style wrapping and overflow
       # (`naa_powers_wrap_like_int`, `cvt_size_wraps_negative_like_a_c_size_t_cast`), and
       # only a debug build has the overflow checks that would catch an accidental one.
       - name: Test
-        run: cargo test --locked
+        run: cargo test
 
       # End-to-end proof that the release binary runs, and specifically that
       # `current_time()` -- the one per-platform piece of the port -- returns a usable
@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '>a\nMKVLAAGIVGLLQPFAAWAQEDTNSA\n>b\nMKVLAAGIVGLLQPFAAWAQEDTNSA\n>c\nQQPTVWERTYHKLMNDCFGIPASVRE\n' > smoke.faa
-          cargo run --release --locked --quiet -- prot -i smoke.faa -o smoke.out -c 0.9 -n 5 | tee smoke.log
+          cargo run --release --quiet -- prot -i smoke.faa -o smoke.out -c 0.9 -n 5 | tee smoke.log
           grep -q 'Total CPU time' smoke.log
           test -s smoke.out.clstr
 
@@ -116,6 +116,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # `check`, not `build`: this job answers "does the declared MSRV compile it", and
-      # the matrix above already covers running it.
+      # the matrix above already covers running it. Without a tracked lock file the
+      # resolver picks the newest compatible dependency versions, so `resolver = "3"` in
+      # Cargo.toml is what keeps it from choosing one that needs a newer rustc than we
+      # declare.
       - name: Check
-        run: cargo check --all-targets --locked
+        run: cargo check --all-targets
