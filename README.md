@@ -4,8 +4,8 @@ A Rust translation of [CD-HIT](https://github.com/weizhongli/cdhit) 4.8.1.
 
 Note that the original code is nondeterministic when using multiple threads: its `.clstr`
 differs between two runs at the same `-T`, and differs again from `-T 1`. This port is
-deterministic — `-T` changes only speed, and the output matches the C++ `-T 1` at every
-thread count.
+deterministic — two runs at the same `-T` always agree — and under `-g 1` its output is
+bit-identical at every thread count and matches the C++ `-T 1`. See [Threading](#threading).
 
 * 2026-09-03: First translation. There are some intricate details in the code so more testing needed
 
@@ -34,7 +34,7 @@ Perl post-processing scripts.
 
 ## Status
 
-The translation is faithful. Across every input and option combination in `tests/` — 241
+The translation is faithful. Across every input and option combination in `tests/` — 263
 cases — the `.clstr` file and the representative FASTA are **byte-identical** to the C++
 binary's, and a randomised differential harness adds several hundred more.
 
@@ -58,8 +58,9 @@ byte-identical output to the C++:
 
 Reproduce with `BENCH_DNA=<dna.fna> BENCH_AA=<prot.faa> ./tests/bench.sh`.
 
-Peak RSS is slightly lower than the C++ too (89 MB vs 93 MB on the `-n 10` case), and no
-longer grows with `-T`.
+Peak RSS is slightly lower than the C++ too (89 MB vs 93 MB on the `-n 10` case), and grows
+far less with `-T`: 21 MB at `-T 1` and 11 MB at `-T 20` on the protein case in
+[Threading](#threading), against 32 MB and 344 MB for the C++.
 
 
 ```
@@ -87,10 +88,47 @@ tests/gen_edge.py`.
 
 ## Threading
 
-`-T` is a pure speed knob here: the output is bit-identical at every thread count, and
-matches the C++ `-T 1` output. The upstream OpenMP path is racy — it produces a different
-clustering from run to run at the same `-T` — so there was no fixed behaviour to be
-compatible with. See `NAMING.md`.
+`SequenceDB::DoClustering` splits the database into blocks: a block is clustered serially
+into a word table, then every later sequence is screened against that finished table, which
+is the part that parallelises. Upstream cuts the block down to `(N - i) / (2 + T)` once
+`-T` is in play; without that cut, a database that fits one word table is a single block
+and the screening phase gets an empty range. This port applies the cut, from upstream's own
+formula (`cdhit-common.c++:3098`).
+
+Best of five, 5,359 protein representatives, `-c 0.99 -g 1 -n 2 -M 0`, 40-core Xeon Gold
+6138. All twenty runs produced byte-identical output:
+
+| `-T` | C++ wall / CPU | Rust wall / CPU |
+| --- | --- | --- |
+| 1 | 2.96s / 2.93s | 2.49s / 2.47s |
+| 4 | 1.13s / 3.61s | 1.05s / 2.90s |
+| 8 | 0.70s / 3.99s | 0.81s / 3.81s |
+| 20 | 0.58s / 6.04s | 0.44s / 4.82s |
+
+On a redundancy-heavy input the split also *removes* work: a sequence matched by an early
+block's table is skipped by every later block, where a single block would have compared it
+against everything. On 21,436 protein sequences at `-c 0.98 -g 1 -n 2` (four mutated copies
+of the input above), CPU time falls from 6.7s at `-T 1` to 1.9s at `-T 20` and wall time to
+1.3s; the C++ manages 2.5s at `-T 8` and gets slower again at `-T 20`.
+
+Determinism: two runs at the same `-T` always agree, unlike upstream, whose `may_stop` /
+`self_stop` / `stop` flags are written and read by several threads under nothing stronger
+than `#pragma omp flush`. Across thread counts:
+
+* **`-g 1`**: `-T` cannot change the answer. `CheckOne` never marks a sequence redundant in
+  that mode — it records the best hit so far in `seq.identity` and skips any candidate that
+  cannot beat it — so the winner is the global best whichever block it was met in.
+* **`-g 0`** (the default): `CheckOne` stops at its *first* hit, so meeting an earlier
+  block's representatives first can select a different, equally valid representative.
+  Upstream's `-T` has the same sensitivity. It rarely bites — on both the protein input
+  above and a 5,359-sequence nucleotide one every `-T` still gives byte-identical output to
+  `-T 1` and to the C++ — but `tests/data/prot_split.faa` is deliberately noisy enough to
+  show it, for the C++ as well as here.
+
+Upstream's parallel driver also overlaps the serial block build with the screening, out of
+a second word table. That is not reproduced, and is the remaining headroom: the serial block
+loop is about 6% of the comparisons at `-T 20` and 9% at `-T 8`, which is where the C++
+`-T 8` figure above comes from. See `NAMING.md`.
 
 ## Licence
 

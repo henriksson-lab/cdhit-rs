@@ -141,4 +141,42 @@ for fam in range(12):
 rng.shuffle(recs)
 write('dna_longn50.fna', recs)
 
+# ---- prot_split / dna_split: more than 1000 sequences.
+#
+# `SequenceDB::DoClustering` only cuts a block short under -T once the database is over
+# 1000 sequences (`if( m > i + 1E3 ) m = i + (N - i) / (2+T);`, cdhit-common.c++:3103).
+# Below that the whole database is one block whatever -T says, so the smaller inputs
+# above never reach the threaded screening phase. These two do -- and they are noisy
+# enough (families straddling the identity cutoff, ragged ends, singletons) that a split
+# that picked a different representative would show up as a diff.
+rng = random.Random(97)
+recs = []
+for fam in range(300):
+    L = rng.randint(50, 180)
+    base = ''.join(rng.choice(AA) for _ in range(L))
+    for i in range(rng.randint(2, 12)):
+        s = mutate(base, rng.uniform(0, .25), AA, rng, indel=0.004)
+        if rng.random() < 0.3:
+            s = s[rng.randint(0, 15):len(s) - rng.randint(0, 15)]
+        recs.append(('u%d_%d' % (fam, i), s))
+for i in range(400):
+    recs.append(('v%d' % i, ''.join(rng.choice(AA) for _ in range(rng.randint(30, 170)))))
+rng.shuffle(recs)
+write('prot_split.faa', recs, wrap_at=80)
+
+rng = random.Random(101)
+recs = []
+for fam in range(300):
+    L = rng.randint(70, 220)
+    base = ''.join(rng.choice(DNA) for _ in range(L))
+    for i in range(rng.randint(2, 12)):
+        s = mutate(base, rng.uniform(0, .12), DNA, rng, indel=0.004)
+        if rng.random() < 0.3:
+            s = revcomp(s)
+        recs.append(('w%d_%d' % (fam, i), s))
+for i in range(400):
+    recs.append(('x%d' % i, ''.join(rng.choice(DNA) for _ in range(rng.randint(50, 210)))))
+rng.shuffle(recs)
+write('dna_split.fna', recs, wrap_at=70)
+
 print('wrote', sorted(os.listdir(OUT)))

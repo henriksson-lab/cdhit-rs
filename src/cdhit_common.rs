@@ -5663,9 +5663,11 @@ impl SequenceDB {
 
         let mut tabsize: usize = 0;
 
-        // COMPAT: upstream sizes the tables from `threads`, so `-T` changes where blocks
-        // are cut and hence the clustering. Pinning this to 1 is what lets `-T` be a pure
-        // speed knob here.
+        // COMPAT: upstream sizes the tables from `threads`, so `-T` scales the memory
+        // limits and hence the *table capacity* as well as the block boundaries. Pinning
+        // this to 1 keeps the capacity a property of `-M` alone; the T-dependent block
+        // split that makes the screen phase non-empty is applied explicitly below, from
+        // upstream's own formula.
         let mut opts = options.clone();
         opts.threads = 1;
         opts.compute_table_limits(
@@ -5705,6 +5707,53 @@ impl SequenceDB {
                     sum += 1;
                 }
                 m += 1;
+            }
+            // COMPAT: `SequenceDB::DoClustering( int T, ... )` (`cdhit-common.c++:3098`)
+            // cuts the block short once `-T` is in play:
+            //
+            //     if( (m > i + 1E4) && (m > i + (N - i) / (2+T)) ) m = i + (N - i) / (2+T);
+            //     if( m == i || m >= N ){ m = N; if( m > i + 1E3 ) m = i + (N - i) / (2+T); }
+            //
+            // Without it a database that fits one word table is a single block, the block
+            // loop clusters every sequence, and the screen phase below gets an empty range
+            // -- which is why `-T` used to be a no-op here. Splitting the block puts the
+            // bulk of the comparisons back into that phase, where they parallelise.
+            //
+            // Doing so is not free of consequence: a sequence now meets the
+            // representatives of earlier blocks in `screen_against_table` and those of its
+            // own block in `cluster_one`, instead of all of them in one `cluster_one` call.
+            // Under `-g 1` that is invisible -- `check_one` never marks a sequence
+            // redundant, it only records the best hit so far in `seq.identity` and skips
+            // any candidate that cannot beat it, so the winner is the global best whatever
+            // the block boundaries are. Under `-g 0` `check_one` stops at its first hit, so
+            // a different split can pick a different (equally valid) representative, which
+            // is exactly the sensitivity upstream's own `-T` has.
+            //
+            // The rest of upstream's parallel driver is deliberately not reproduced: its
+            // two-table pipeline (which only overlaps the serial block with the parallel
+            // screen), its `i == 0` quarter-size first block, its `remaining` carry-over,
+            // its speculative pre-screen of a block against the table being built, and the
+            // `may_stop` / `self_stop` / `stop` flags that several threads write under
+            // nothing stronger than `#pragma omp flush`. That last group is what makes
+            // upstream's output vary from run to run at the same `-T`; leaving it out costs
+            // nothing but the overlap and keeps every thread count reproducible.
+            if t > 1 {
+                // `.max(i + 1)`: upstream's formula can round to a zero-length block once
+                // `2 + T` exceeds the 1000 that guards it, i.e. from `-T 999` up. The block
+                // loop would then add nothing, `word_table.size` would stay 0, `i` would
+                // not advance and the outer loop would spin forever -- upstream included.
+                // No real `-T` reaches that (it is clamped to the CPU count), but a stall
+                // is not a failure mode worth inheriting.
+                let split = (i + (n - i) / (2 + t)).max(i + 1);
+                if m > i + 10000 && m > split {
+                    m = split;
+                }
+                if m == i || m >= n {
+                    m = n;
+                    if m > i + 1000 {
+                        m = split;
+                    }
+                }
             }
             println!("\rcomparing sequences from  {:9}  to  {:9}", i, m);
             let _ = std::io::stdout().flush();

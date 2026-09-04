@@ -118,6 +118,7 @@ est "$DATA/dna_mixed.fna" "est_mem200"    -c 0.9 -M 200 -T 1
 est "$DATA/dna_mixed.fna" "est_mem0"      -c 0.9 -M 0 -T 1
 est "$DATA/dna_mixed.fna.gz" "est_gz"     -c 0.9 -T 1
 est "$DATA/dna_dup.fna"   "est_dup"       -c 0.98 -T 1
+est "$DATA/dna_split.fna" "est_split"     -c 0.90 -T 1
 est "$DATA/dna_dup.fna"   "est_dup_trim"  -c 0.95 -cx 100 -T 1
 est "$DATA/dna_small.fna" "est_dist"      -D 0.05 -T 1
 
@@ -205,6 +206,7 @@ prot "$DATA/prot_mixed.faa" "aa_desc0"    -c 0.9 -d 0 -T 1
 prot "$DATA/prot_mixed.faa" "aa_sortc"    -c 0.9 -sc 1 -T 1
 prot "$DATA/prot_mixed.faa" "aa_mem200"   -c 0.9 -M 200 -T 1
 prot "$DATA/prot_mixed.faa" "aa_mem0"     -c 0.9 -M 0 -T 1
+prot "$DATA/prot_split.faa" "aa_split"   -c 0.90 -T 1
 prot "$DATA/prot_mixed.faa" "aa_unmatch"  -c 0.9 -uL 0.3 -uS 0.3 -T 1
 prot "$DATA/prot_small.faa" "aa_dist"     -D 0.1 -T 1
 
@@ -307,31 +309,72 @@ thread_case cd-hit     "$DATA/prot_mixed.faa" "thr_aa"      -c 0.90
 thread_case cd-hit-454 "$DATA/dna_dup.fna"   "thr_454"      -c 0.98
 thread_case cd-hit-est "$DATA/dna_longn50.fna" "thr_longn50" -c 0.95 -M 0
 
-# The cases above all fit in a single word table, and `screen_against_table` -- the only
-# parallel code in 1D clustering -- covers the sequences *after* the current block. With
-# one block that range is empty, so those cases never execute the threaded path at all.
-# These force several blocks by squeezing -M just above the memory floor, so the workers
-# actually run. Check with: the run prints one "comparing sequences from" line per block.
+# The cases above are all under 1000 sequences, and `DoClustering`'s -T block split only
+# engages above that (`if( m > i + 1E3 ) ...`). They therefore still run as a single block
+# at every -T, and the parallel screening phase gets an empty range. The two inputs below
+# are over 2000 sequences, so -T really does cut the block and the workers really do run.
+#
+# Under -g 1 the split is invisible: `CheckOne` never marks a sequence redundant, it only
+# records the best hit so far in `seq.identity` and skips any candidate that cannot beat
+# it, so the winner is the global best whichever block it was met in. Hence the strict
+# comparison against the C++ -T 1 output still applies.
+thread_case cd-hit     "$DATA/prot_split.faa" "thr_aa_split_g"   -c 0.90 -g 1
+thread_case cd-hit     "$DATA/prot_split.faa" "thr_aa_split99_g" -c 0.99 -n 2 -g 1
+thread_case cd-hit-est "$DATA/dna_split.fna"  "thr_est_split_g"  -c 0.90 -g 1
+thread_case cd-hit-est "$DATA/dna_split.fna"  "thr_est_split99_g" -c 0.99 -n 8 -g 1
+
+# Under -g 0 it is not: `CheckOne` stops at its *first* hit, and the candidate order
+# depends on which representatives share a word with the query, so meeting an earlier
+# block's representatives first can pick a different -- equally valid -- representative.
+# Upstream's -T has exactly the same sensitivity (`cdhit/cd-hit -T 2` on prot_split.faa
+# differs from its own -T 1), so there is no fixed answer to compare against. What can be
+# required, and is more than upstream manages, is that each -T is reproducible: the same
+# input and the same -T must give the same clustering every time.
+repeat_case() {                   # repeat_case <prog> <input> <label> <opts...>
+  local prog="$1" input="$2" label="$3"; shift 3
+  for t in 2 4 8; do
+    local a="$WORK/rep.$label.$t.a" b="$WORK/rep.$label.$t.b"
+    "$RS/$prog" -i "$input" -o "$a" -T $t "$@" > "$WORK/r.log" 2>&1
+    "$RS/$prog" -i "$input" -o "$b" -T $t "$@" > "$WORK/r.log" 2>&1
+    if diff -q "$a.clstr" "$b.clstr" >/dev/null 2>&1 && diff -q "$a" "$b" >/dev/null 2>&1; then
+      pass=$((pass+1))
+    else
+      echo "FAIL $label -T $t (two runs at the same -T disagree)"
+      diff "$a.clstr" "$b.clstr" 2>&1 | head -6
+      fail=$((fail+1)); failed+=("$label-T$t")
+    fi
+  done
+}
+repeat_case cd-hit     "$DATA/prot_split.faa" "rep_aa_split"  -c 0.90
+repeat_case cd-hit-est "$DATA/dna_split.fna"  "rep_est_split" -c 0.90
+
+# The -M route to several blocks, which is what a memory-limited run takes and which the
+# -T split has to compose with. Squeeze -M just above the memory floor.
 thread_case cd-hit-est "$DATA/dna_mixed.fna"  "thr_est_mb"  -c 0.90 -n 8 -M 14
 thread_case cd-hit-est "$DATA/dna_dup.fna"    "thr_dup_mb"  -c 0.95 -n 8 -M 14
 thread_case cd-hit     "$DATA/prot_mixed.faa" "thr_aa_mb"   -c 0.90 -n 4 -M 14
 thread_case cd-hit-est "$DATA/dna_small.fna"  "thr_small_mb" -c 0.95 -n 8 -M 14
 
 # Guard the guard: if a change to the memory accounting moves the block boundaries, the
-# cases above would silently go back to being single-block and stop testing anything.
-for spec in "cd-hit-est|$DATA/dna_mixed.fna|-c 0.90 -n 8 -M 14" \
-            "cd-hit-est|$DATA/dna_dup.fna|-c 0.95 -n 8 -M 14" \
-            "cd-hit|$DATA/prot_mixed.faa|-c 0.90 -n 4 -M 14" \
-            "cd-hit-est|$DATA/dna_small.fna|-c 0.95 -n 8 -M 14"; do
-  prog="${spec%%|*}"; rest="${spec#*|}"; input="${rest%%|*}"; opts="${rest#*|}"
-  blocks=$("$RS/$prog" -i "$input" -o "$WORK/blk" $opts -T 1 2>&1 |
+# -M cases would silently go back to being single-block and stop testing anything. The
+# -T cases are guarded the same way, at -T 8 -- a regression that made -T a no-op again
+# would leave them at one block, and every diff above would still pass.
+for spec in "cd-hit-est|$DATA/dna_mixed.fna|-c 0.90 -n 8 -M 14|1" \
+            "cd-hit-est|$DATA/dna_dup.fna|-c 0.95 -n 8 -M 14|1" \
+            "cd-hit|$DATA/prot_mixed.faa|-c 0.90 -n 4 -M 14|1" \
+            "cd-hit-est|$DATA/dna_small.fna|-c 0.95 -n 8 -M 14|1" \
+            "cd-hit|$DATA/prot_split.faa|-c 0.90|8" \
+            "cd-hit-est|$DATA/dna_split.fna|-c 0.90|8"; do
+  prog="${spec%%|*}"; rest="${spec#*|}"; input="${rest%%|*}"; rest="${rest#*|}"
+  opts="${rest%%|*}"; t="${rest##*|}"
+  blocks=$("$RS/$prog" -i "$input" -o "$WORK/blk" $opts -T $t 2>&1 |
              grep -c "comparing sequences from")
   if [ "$blocks" -gt 1 ]; then
     pass=$((pass+1))
   else
-    echo "FAIL multiblock_guard $prog $(basename "$input"): $blocks block(s), expected >1"
+    echo "FAIL multiblock_guard $prog $(basename "$input") -T $t: $blocks block(s), expected >1"
     echo "     the -T cases for this input are no longer exercising the parallel path"
-    fail=$((fail+1)); failed+=("multiblock_guard_$prog")
+    fail=$((fail+1)); failed+=("multiblock_guard_${prog}_T$t")
   fi
 done
 
