@@ -79,7 +79,7 @@ pub fn main(argv: &[String]) {
     println!("total seq: {}", seq_db.sequences.len());
     seq_db.sort_divide(&mut options, true, &alphabet);
 
-    seq_db.do_clustering(&options.clone(), &mat, &naa_tab, &[]);
+    seq_db.do_clustering(&options, &mat, &naa_tab, &[]);
 
     println!("writing new database");
     seq_db.write_clusters(&db_in, &db_out, &options);

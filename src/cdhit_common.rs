@@ -40,12 +40,38 @@
 #![allow(clippy::needless_range_loop)]
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ===========================================================================
 // cdhit-common.h
 // ===========================================================================
 
 pub const CDHIT_VERSION: &str = "4.8.1";
+static QUIET_OUTPUT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet_output(quiet: bool) {
+    QUIET_OUTPUT.store(quiet, Ordering::Relaxed);
+}
+
+pub fn quiet_output() -> bool {
+    QUIET_OUTPUT.load(Ordering::Relaxed)
+}
+
+macro_rules! cdhit_print {
+    ($($arg:tt)*) => {
+        if !$crate::cdhit_common::quiet_output() {
+            ::std::print!($($arg)*);
+        }
+    };
+}
+
+macro_rules! cdhit_println {
+    ($($arg:tt)*) => {
+        if !$crate::cdhit_common::quiet_output() {
+            ::std::println!($($arg)*);
+        }
+    };
+}
 
 /// Upstream compiles this in as a hard cap on sequence length. Here it survives only as the
 /// scaling factor `ScoreMatrix` applies to every substitution score and gap penalty, which
@@ -376,7 +402,7 @@ pub struct WorkingBuffer {
     /// no state carries between calls. It also removes a pointer chase and a bounds check
     /// per cell access, and the per-row allocations.
     pub score_mat: Vec<i64>,
-    pub back_mat: Vec<i32>,
+    pub back_mat: Vec<u8>,
     /// Row stride of `score_mat` / `back_mat`: the widest band seen so far.
     pub dp_stride: usize,
     /// `diag_score` and `diag_score2` packed into one word per diagonal: the low 32 bits
@@ -778,7 +804,7 @@ impl Options {
                 self.threads = intval;
                 if self.threads > cpu {
                     self.threads = cpu;
-                    println!("Warning: total number of CPUs in the system is {}", cpu);
+                    cdhit_println!("Warning: total number of CPUs in the system is {}", cpu);
                 } else if self.threads < 0 {
                     self.threads += cpu;
                     if self.threads < 0 {
@@ -787,10 +813,10 @@ impl Options {
                 }
                 if self.threads == 0 {
                     self.threads = cpu;
-                    println!("total number of CPUs in the system is {}", cpu);
+                    cdhit_println!("total number of CPUs in the system is {}", cpu);
                 }
                 if self.threads != intval {
-                    println!("Actual number of CPUs to be used: {}\n", self.threads);
+                    cdhit_println!("Actual number of CPUs to be used: {}\n", self.threads);
                 }
             }
             _ => return false,
@@ -902,30 +928,30 @@ impl Options {
         alphabet: &mut Alphabet,
     ) -> bool {
         let argc = argv.len();
-        println!("================================================================");
-        println!(
+        cdhit_println!("================================================================");
+        cdhit_println!(
             "Program: CD-HIT, V{}{}, {}, {}",
             CDHIT_VERSION,
             with_openmp(),
             build_date_banner(),
             build_time()
         );
-        print!("Command:");
+        cdhit_print!("Command:");
         let mut n = 9;
         for a in argv.iter() {
             n += a.len() + 1;
             if n >= 64 {
-                print!("\n         {}", a);
+                cdhit_print!("\n         {}", a);
                 n = a.len() + 9;
             } else {
-                print!(" {}", a);
+                cdhit_print!(" {}", a);
             }
         }
-        println!("\n");
-        print!("Started: {}", ctime_now());
-        println!("================================================================");
-        println!("                            Output                              ");
-        println!("----------------------------------------------------------------");
+        cdhit_println!("\n");
+        cdhit_print!("Started: {}", ctime_now());
+        cdhit_println!("================================================================");
+        cdhit_println!("                            Output                              ");
+        cdhit_println!("----------------------------------------------------------------");
         self.has_2d = twod;
         self.is_est = est;
         let mut i = 1;
@@ -1045,9 +1071,10 @@ impl Options {
                 if NAA_STAT[(self.tolerance - 1) as usize][clstr_idx as usize][(5 - i) as usize]
                     > 10
                 {
-                    println!(
+                    cdhit_println!(
                         "Your word length is {}, using {} may be faster!",
-                        self.naa, i
+                        self.naa,
+                        i
                     );
                     break;
                 }
@@ -1055,40 +1082,47 @@ impl Options {
             }
         } else if self.is_est {
             if self.cluster_thd > 0.9 && self.naa < 8 {
-                println!(
+                cdhit_println!(
                     "Your word length is {}, using {} may be faster!",
-                    self.naa, 8
+                    self.naa,
+                    8
                 );
             } else if self.cluster_thd > 0.87 && self.naa < 5 {
-                println!(
+                cdhit_println!(
                     "Your word length is {}, using {} may be faster!",
-                    self.naa, 5
+                    self.naa,
+                    5
                 );
             } else if self.cluster_thd > 0.80 && self.naa < 4 {
-                println!(
+                cdhit_println!(
                     "Your word length is {}, using {} may be faster!",
-                    self.naa, 4
+                    self.naa,
+                    4
                 );
             } else if self.cluster_thd > 0.75 && self.naa < 3 {
-                println!(
+                cdhit_println!(
                     "Your word length is {}, using {} may be faster!",
-                    self.naa, 3
+                    self.naa,
+                    3
                 );
             }
         } else if self.cluster_thd > 0.85 && self.naa < 5 {
-            println!(
+            cdhit_println!(
                 "Your word length is {}, using {} may be faster!",
-                self.naa, 5
+                self.naa,
+                5
             );
         } else if self.cluster_thd > 0.80 && self.naa < 4 {
-            println!(
+            cdhit_println!(
                 "Your word length is {}, using {} may be faster!",
-                self.naa, 4
+                self.naa,
+                4
             );
         } else if self.cluster_thd > 0.75 && self.naa < 3 {
-            println!(
+            cdhit_println!(
                 "Your word length is {}, using {} may be faster!",
-                self.naa, 3
+                self.naa,
+                3
             );
         }
 
@@ -1099,24 +1133,24 @@ impl Options {
 
     /// `Options::Print`
     pub fn print(&self) {
-        println!("isEST = {}", self.is_est as i32);
-        println!("has2D = {}", self.has_2d as i32);
-        println!("NAA = {}", self.naa);
-        println!("NAA_top_limit = {}", self.naa_top_limit);
-        println!("min_length = {}", self.min_length);
-        println!("cluster_best = {}", self.cluster_best as i32);
-        println!("global_identity = {}", self.global_identity as i32);
-        println!("cluster_thd = {}", self.cluster_thd);
-        println!("diff_cutoff = {}", self.diff_cutoff);
-        println!("diff_cutoff_aa = {}", self.diff_cutoff_aa);
-        println!("tolerance = {}", self.tolerance);
-        println!("long_coverage = {}", self.long_coverage);
-        println!("long_control = {}", self.long_control);
-        println!("short_coverage = {}", self.short_coverage);
-        println!("short_control = {}", self.short_control);
-        println!("frag_size = {}", self.frag_size);
-        println!("option_r = {}", self.option_r);
-        println!("print = {}", self.print);
+        cdhit_println!("isEST = {}", self.is_est as i32);
+        cdhit_println!("has2D = {}", self.has_2d as i32);
+        cdhit_println!("NAA = {}", self.naa);
+        cdhit_println!("NAA_top_limit = {}", self.naa_top_limit);
+        cdhit_println!("min_length = {}", self.min_length);
+        cdhit_println!("cluster_best = {}", self.cluster_best as i32);
+        cdhit_println!("global_identity = {}", self.global_identity as i32);
+        cdhit_println!("cluster_thd = {}", self.cluster_thd);
+        cdhit_println!("diff_cutoff = {}", self.diff_cutoff);
+        cdhit_println!("diff_cutoff_aa = {}", self.diff_cutoff_aa);
+        cdhit_println!("tolerance = {}", self.tolerance);
+        cdhit_println!("long_coverage = {}", self.long_coverage);
+        cdhit_println!("long_control = {}", self.long_control);
+        cdhit_println!("short_coverage = {}", self.short_coverage);
+        cdhit_println!("short_control = {}", self.short_control);
+        cdhit_println!("frag_size = {}", self.frag_size);
+        cdhit_println!("option_r = {}", self.option_r);
+        cdhit_println!("print = {}", self.print);
     }
 }
 
@@ -1182,6 +1216,120 @@ fn unpack_diag(v: u64) -> (i32, i32) {
     (v as u32 as i32, (v >> 32) as i32)
 }
 
+#[inline(always)]
+fn finish_diag_band_u16(
+    len1: i32,
+    nall: i32,
+    band_b: i32,
+    band_e: i32,
+    band_width: i32,
+    options: &Options,
+    cnt: &[u16],
+    cpx: &[u16],
+) -> (i32, i32, i32, i32) {
+    let span = (band_e - band_b + 1) as usize;
+    debug_assert!(band_b <= band_e);
+    debug_assert!(span <= cnt.len());
+    debug_assert!(span <= cpx.len());
+
+    let cnt_p = cnt.as_ptr();
+    let cpx_p = cpx.as_ptr();
+    macro_rules! diag {
+        ($k:expr) => {{
+            let k = $k;
+            debug_assert!(k < span);
+            // SAFETY: all callers pass arrays filled for `[band_b, band_e]`, and this
+            // scanner only asks for diagonals inside that closed interval.
+            unsafe { (*cnt_p.add(k) as i32, *cpx_p.add(k) as i32) }
+        }};
+    }
+
+    let band_m = if band_b + band_width - 1 < band_e {
+        band_b + band_width - 1
+    } else {
+        band_e
+    };
+    let mut best_score = 0;
+    let mut best_score2 = 0;
+    let mut max_diag2 = 0;
+    let mut imax_off = 0usize;
+    let initial_len = (band_m - band_b + 1) as usize;
+    for i in 0..initial_len {
+        let (e0, e1) = diag!(i);
+        best_score += e0;
+        best_score2 += e1;
+        if e1 > max_diag2 {
+            max_diag2 = e1;
+            imax_off = i;
+        }
+    }
+
+    let mut from_off = 0usize;
+    let mut end_off = initial_len - 1;
+    let mut score = best_score;
+    let mut score2 = best_score2;
+    let mut k = 0usize;
+    let mut j = initial_len;
+    let slide_end = (band_e - band_b) as usize;
+    while j < slide_end {
+        let (k0, k1) = diag!(k);
+        let (j0, j1) = diag!(j);
+        score -= k0;
+        score += j0;
+        score2 -= k1;
+        score2 += j1;
+        if score2 > best_score2 {
+            from_off = k + 1;
+            end_off = j;
+            best_score = score;
+            best_score2 = score2;
+            if j1 > max_diag2 {
+                max_diag2 = j1;
+                imax_off = j;
+            }
+        }
+        j += 1;
+        k += 1;
+    }
+
+    let imax_diag = band_b + imax_off as i32;
+    let mlen = if imax_diag > len1 {
+        nall - imax_diag
+    } else {
+        imax_diag
+    };
+    let emax = cvt_int((1.0 - options.cluster_thd) * mlen as f64) + 1;
+    let mut j = from_off;
+    while j < imax_off {
+        let cnt_j = diag!(j).0;
+        if (imax_off - j) as i32 > emax || cnt_j < 1 {
+            best_score -= cnt_j;
+            from_off += 1;
+        } else {
+            break;
+        }
+        j += 1;
+    }
+    let mut j = end_off;
+    while j > imax_off {
+        let cnt_j = diag!(j).0;
+        if (j - imax_off) as i32 > emax || cnt_j < 1 {
+            best_score -= cnt_j;
+            end_off -= 1;
+        } else {
+            break;
+        }
+        j -= 1;
+    }
+
+    (
+        best_score,
+        band_b + from_off as i32 - len1 + 1,
+        imax_diag - len1 + 1,
+        band_b + end_off as i32 - len1 + 1,
+    )
+}
+
 ////For smiple len1 <= len2, len2 is for existing representative
 ////walk along all diag path of two sequences,
 ////find the diags with most aap
@@ -1220,12 +1368,7 @@ pub fn diag_test_aapn(
     options: &Options,
 ) -> i32 {
     let nall = len1 + len2 - 1;
-    let taap = &buffer.taap;
-    let aap_begin = &buffer.aap_begin;
-    let aap_list = &buffer.aap_list;
-    let diag_score = &mut buffer.diag_score;
-
-    if nall as usize > diag_score.len() {
+    if nall as usize > buffer.diag_score.len() {
         bomb_error("in diag_test_aapn, MAX_DIAG reached");
     }
 
@@ -1243,10 +1386,27 @@ pub fn diag_test_aapn(
 
     // Upstream clears all `nall` diagonals before counting. Only `[band_b, band_e]` is ever
     // read back, though -- the scans below never look outside it -- so clearing just that
-    // range is equivalent and, at low identity thresholds where `band_b` is large and every
-    // representative becomes a candidate, is most of the work this function does. Counts
-    // that land outside the range are written and never read; the next call clears whatever
-    // part of the array it is going to read.
+    // range is equivalent. Counting is the expensive half; on AVX-512 hardware the
+    // vectorised form computes the same packed counters for this readable range and skips
+    // the scalar scatter loop.
+    let simd_done = simd_diag_count_aa(&mut buffer.simd, naa1, iseq2, len1, len2, band_b, band_e);
+    if simd_done {
+        let cnt = &buffer.simd.cnt;
+        let cpx = &buffer.simd.cpx;
+        let (score, left, center, right) =
+            finish_diag_band_u16(len1, nall, band_b, band_e, band_width, options, cnt, cpx);
+        *band_left = left;
+        *band_center = center;
+        *band_right = right;
+        *best_sum = score;
+        return OK_FUNC;
+    }
+
+    let taap = &buffer.taap;
+    let aap_begin = &buffer.aap_begin;
+    let aap_list = &buffer.aap_list;
+    let diag_score = &mut buffer.diag_score;
+
     if band_b <= band_e {
         diag_score[band_b as usize..=band_e as usize].fill(0);
     }
@@ -1348,8 +1508,9 @@ pub fn diag_test_aapn(
     #[allow(clippy::mut_range_bound)]
     for j in from..imax_diag {
         // if aap pairs fail to open gap
-        if (imax_diag - j) > emax || unpack_diag(ds[j as usize]).0 < 1 {
-            best_score -= unpack_diag(ds[j as usize]).0;
+        let cnt_j = unpack_diag(ds[j as usize]).0;
+        if (imax_diag - j) > emax || cnt_j < 1 {
+            best_score -= cnt_j;
             from += 1;
         } else {
             break;
@@ -1358,8 +1519,9 @@ pub fn diag_test_aapn(
     let mut j = end;
     while j > imax_diag {
         // if aap pairs fail to open gap
-        if (j - imax_diag) > emax || unpack_diag(ds[j as usize]).0 < 1 {
-            best_score -= unpack_diag(ds[j as usize]).0;
+        let cnt_j = unpack_diag(ds[j as usize]).0;
+        if (j - imax_diag) > emax || cnt_j < 1 {
+            best_score -= cnt_j;
             end -= 1;
         } else {
             break;
@@ -1402,10 +1564,15 @@ pub fn diag_test_aapn(
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 #[derive(Default)]
 pub struct SimdDiag {
+    /// Protein query 2-mers grouped by complexity weight 1..=2.
+    ///
+    /// Each entry is `position | (code << 32)`.
+    aa_grp: [Vec<u64>; 3],
     /// Query positions grouped by complexity weight 1..=4, and their packed 4-mer codes.
     grp_b: [Vec<u32>; 5],
     grp_c: [Vec<u8>; 5],
     /// The representative's packed codes, padded, in the two sentinel flavours.
+    aa_rep: Vec<u16>,
     ra: Vec<u8>,
     rb: Vec<u8>,
     /// Per-diagonal accumulators, indexed from `band_b`.
@@ -1435,6 +1602,26 @@ fn simd_diag_supported() -> bool {
 }
 
 impl SimdDiag {
+    /// Group the query's protein 2-mer codes by complexity weight. Called once per query
+    /// strand, from `compute_aap`, so the vector diagonal test does no per-candidate query
+    /// indexing work.
+    fn prepare_query_aa(&mut self, seqi: &[u8], size: i32, naa1: i32) {
+        for v in 0..3 {
+            self.aa_grp[v].clear();
+        }
+        let nq = size - 1;
+        if nq <= 0 {
+            return;
+        }
+        for b in 0..nq as usize {
+            let c0 = seqi[b];
+            let c1 = seqi[b + 1];
+            let code = (c0 as i32 * naa1 + c1 as i32) as u16;
+            let w = 1 + (c0 != c1) as usize;
+            self.aa_grp[w].push((b as u64) | ((code as u64) << 32));
+        }
+    }
+
     /// Group the query's 4-mer codes by complexity weight. Called once per query strand,
     /// from `compute_aap2`, so it costs nothing per candidate.
     fn prepare_query(&mut self, seqi: &[u8], size: i32) {
@@ -1459,6 +1646,154 @@ impl SimdDiag {
             self.grp_b[w].push(b as u32);
             self.grp_c[w].push(code);
         }
+    }
+}
+
+/// Protein version of [`simd_diag_kernel`], operating on 2-mer codes in 16-bit lanes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn simd_diag_aa_kernel<const NT: usize>(
+    simd: &SimdDiag,
+    rep: *const u16,
+    porg: isize,
+    o0: isize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    use core::arch::x86_64::*;
+    let ones = std::hint::black_box(_mm512_set1_epi16(1));
+    let mut acc1 = [_mm512_setzero_si512(); NT];
+    let mut acc2 = [_mm512_setzero_si512(); NT];
+    macro_rules! count_group_into {
+        ($w:literal, $acc:expr) => {{
+            let query = &simd.aa_grp[$w];
+            let nb = query.len();
+            for i in 0..nb {
+                let entry = *query.get_unchecked(i);
+                let b = entry as u32 as isize;
+                let qc = (entry >> 32) as u16;
+                let p = rep.offset(porg + b + o0);
+                let qv = _mm512_set1_epi16(qc as i16);
+                for (t, a) in $acc.iter_mut().enumerate() {
+                    let rv = _mm512_loadu_si512(p.add(t * 32) as *const __m512i);
+                    let k = _mm512_cmpeq_epi16_mask(qv, rv);
+                    *a = _mm512_mask_add_epi16(*a, k, *a, ones);
+                }
+            }
+        }};
+    }
+    count_group_into!(1, acc1);
+    count_group_into!(2, acc2);
+    for t in 0..NT {
+        let cp = cnt.add(t * 32);
+        let pp = cpx.add(t * 32);
+        let cnt_add = _mm512_add_epi16(acc1[t], acc2[t]);
+        let cpx_add = _mm512_add_epi16(acc1[t], _mm512_add_epi16(acc2[t], acc2[t]));
+        _mm512_storeu_si512(cp as *mut __m512i, cnt_add);
+        _mm512_storeu_si512(pp as *mut __m512i, cpx_add);
+    }
+}
+
+/// Pick the unrolled protein kernel for `span`, chunking when needed.
+#[cfg(target_arch = "x86_64")]
+unsafe fn simd_diag_aa_dispatch(
+    simd: &SimdDiag,
+    rep: *const u16,
+    porg: isize,
+    o0: isize,
+    span: usize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    macro_rules! call {
+        ($($n:literal),*) => {
+            match span.div_ceil(32) {
+                $( $n => return simd_diag_aa_kernel::<$n>(simd, rep, porg, o0, cnt, cpx), )*
+                _ => {}
+            }
+        };
+    }
+    call!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+    let mut done = 0usize;
+    while done < span {
+        let take = (span - done).min(16 * 32);
+        simd_diag_aa_dispatch(
+            simd,
+            rep,
+            porg,
+            o0 + done as isize,
+            take,
+            cnt.add(done),
+            cpx.add(done),
+        );
+        done += take;
+    }
+}
+
+/// Fill `simd.cnt/cpx` for protein 2-mers using the vectorised counter.
+fn simd_diag_count_aa(
+    simd: &mut SimdDiag,
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    band_b: i32,
+    band_e: i32,
+) -> bool {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (simd, naa1, iseq2, len1, len2, band_b, band_e);
+        false
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if len1 > SIMD_DIAG_MAX_LEN1 || !simd_diag_supported() {
+            return false;
+        }
+        if band_b > band_e || len2 < 2 || len1 < 2 {
+            return false;
+        }
+        let nr = (len2 - 1) as usize;
+        let nq = (len1 - 1) as usize;
+        let span = (band_e - band_b + 1) as usize;
+        let o0 = band_b as isize - len1 as isize + 1;
+
+        let porg = nq + 32 + o0.unsigned_abs();
+        let total = porg + nr + span + nq + 64;
+        if simd.aa_rep.len() < total {
+            simd.aa_rep.resize(total, u16::MAX);
+        }
+        for j in 0..nr {
+            let code = iseq2[j] as i32 * naa1 + iseq2[j + 1] as i32;
+            simd.aa_rep[porg + j] = code as u16;
+        }
+
+        let acc = span + 64;
+        if simd.cnt.len() < acc {
+            simd.cnt.resize(acc, 0);
+            simd.cpx.resize(acc, 0);
+        }
+        let mut cnt = std::mem::take(&mut simd.cnt);
+        let mut cpx = std::mem::take(&mut simd.cpx);
+        unsafe {
+            simd_diag_aa_dispatch(
+                simd,
+                simd.aa_rep.as_ptr(),
+                porg as isize,
+                o0,
+                span,
+                cnt.as_mut_ptr(),
+                cpx.as_mut_ptr(),
+            );
+        }
+
+        simd.cnt = cnt;
+        simd.cpx = cpx;
+        // Keep the reusable representative buffer sentinel-clean. That avoids filling the
+        // much larger prefix/suffix on every candidate while preserving the exact load
+        // semantics: positions outside the current representative are `u16::MAX`.
+        simd.aa_rep[porg..porg + nr].fill(u16::MAX);
+        true
     }
 }
 
@@ -1576,15 +1911,14 @@ unsafe fn simd_diag_dispatch(
     }
 }
 
-/// Fill `diag_score[band_b ..= band_e]` with the same packed counters the scalar loop in
-/// `diag_test_aapn_est` would produce, using the vectorised kernel. Returns `false` when
-/// it declines, in which case the caller must run the scalar loop.
+/// Fill `simd.cnt/cpx` with the same counters the scalar loop in `diag_test_aapn_est`
+/// would produce, using the vectorised kernel. Returns `false` when it declines, in which
+/// case the caller must run the scalar loop.
 ///
 /// Only the *counting* is replaced; everything downstream -- the band scan, the trimming,
 /// `best_sum` -- reads `diag_score` exactly as before.
 fn simd_diag_count(
     simd: &mut SimdDiag,
-    diag_score: &mut [u64],
     iseq2: &[u8],
     len1: i32,
     len2: i32,
@@ -1597,7 +1931,7 @@ fn simd_diag_count(
         // and off x86-64 there is no kernel to dispatch to, so every argument is unused.
         // Declining here makes the caller run the scalar loop, which is the only path the
         // C++ has.
-        let _ = (simd, diag_score, iseq2, len1, len2, band_b, band_e);
+        let _ = (simd, iseq2, len1, len2, band_b, band_e);
         false
     }
     #[cfg(target_arch = "x86_64")]
@@ -1623,8 +1957,6 @@ fn simd_diag_count(
             simd.ra.resize(total, 0xFF);
             simd.rb.resize(total, 0x00);
         }
-        simd.ra[..total].fill(0xFF);
-        simd.rb[..total].fill(0x00);
         for j in 0..nr {
             let c0 = iseq2[j];
             let c1 = iseq2[j + 1];
@@ -1665,11 +1997,13 @@ fn simd_diag_count(
             );
         }
 
-        for i in 0..span {
-            diag_score[band_b as usize + i] = cnt[i] as u64 | ((cpx[i] as u64) << 32);
-        }
         simd.cnt = cnt;
         simd.cpx = cpx;
+        // Keep both sentinel flavours clean between calls. Skipped representative
+        // positions are already sentinel values; valid positions written above are reset
+        // here, avoiding full-buffer clears on the next candidate.
+        simd.ra[porg..porg + nr].fill(0xFF);
+        simd.rb[porg..porg + nr].fill(0x00);
         true
     }
 }
@@ -1732,15 +2066,21 @@ pub fn diag_test_aapn_est(
     // -- so when it runs the scalar loop is skipped and everything after this point is
     // unchanged. It declines on non-AVX-512 hardware, and on queries long enough to
     // overflow its 16-bit accumulators.
-    let simd_done = simd_diag_count(
-        &mut buffer.simd,
-        &mut buffer.diag_score,
-        iseq2,
-        len1,
-        len2,
-        band_b,
-        band_e,
-    );
+    let simd_done = simd_diag_count(&mut buffer.simd, iseq2, len1, len2, band_b, band_e);
+    if simd_done {
+        let cnt = &buffer.simd.cnt;
+        let cpx = &buffer.simd.cpx;
+        let (mut score, left, center, right) =
+            finish_diag_band_u16(len1, nall, band_b, band_e, band_width, options, cnt, cpx);
+        if options.is_454 && (left > 0 || right < 0) {
+            score = 0;
+        }
+        *band_left = left;
+        *band_center = center;
+        *band_right = right;
+        *best_sum = score;
+        return OK_FUNC;
+    }
 
     let taap = &buffer.taap;
     let aap_begin = &buffer.aap_begin;
@@ -1999,9 +2339,9 @@ pub fn local_band_align(
             // penalty for leading gap opening = penalty for gap extension
             // each of the left side query hunging residues give ext_gap (-1)
             score_mat[i as usize * stride + j1 as usize] = (mat.ext_gap as i64) * i as i64;
-            back_mat[i as usize * stride + j1 as usize] = DP_BACK_TOP;
+            back_mat[i as usize * stride + j1 as usize] = DP_BACK_TOP as u8;
         }
-        back_mat[(-tband) as usize * stride + (tband - band_left) as usize] = DP_BACK_NONE;
+        back_mat[(-tband) as usize * stride + (tband - band_left) as usize] = DP_BACK_NONE as u8;
     }
 
     if band_right >= 0 {
@@ -2010,9 +2350,9 @@ pub fn local_band_align(
         for j in tband..=band_right {
             let j1 = j - band_left;
             score_mat[j1 as usize] = (mat.ext_gap as i64) * j as i64;
-            back_mat[j1 as usize] = DP_BACK_LEFT;
+            back_mat[j1 as usize] = DP_BACK_LEFT as u8;
         }
-        back_mat[(tband - band_left) as usize] = DP_BACK_NONE;
+        back_mat[(tband - band_left) as usize] = DP_BACK_NONE as u8;
     }
 
     let gap_open = [mat.gap, mat.ext_gap];
@@ -2036,72 +2376,140 @@ pub fn local_band_align(
         let ci = iseq1[(i - 1) as usize] as usize;
         let mrow = &mat.matrix[ci];
 
-        // Split the two rows the sweep touches out of the flat matrices, then narrow each
-        // one to exactly the `j1` range. Indexing those by the loop counter lets the bounds
-        // checks fall away: this loop runs once per DP cell and is a quarter of the
-        // program's time.
+        // The two flat matrices have a uniform stride, so derive the hot-row pointers
+        // directly. The debug assertions preserve the bounds proof while keeping the release
+        // build out of slice-indexing and split-at setup on every DP row.
         let cur_base = i as usize * stride;
         let prev_base = cur_base - stride;
-        let (s_head, s_tail) = score_mat.split_at_mut(cur_base);
-        let (b_head, b_tail) = back_mat.split_at_mut(cur_base);
+        debug_assert!(prev_base + j0u + 1 + n <= score_mat.len());
+        debug_assert!(cur_base + j0u + n <= score_mat.len());
+        debug_assert!(prev_base + j0u + 1 + n <= back_mat.len());
+        debug_assert!(cur_base + j0u + n <= back_mat.len());
 
         // The `j1 - 1` cell is whatever the previous iteration wrote, so carry it in a
         // register; only the first iteration has to read it back, from the band border.
-        let mut left_s: i64 = if j0u > 0 { s_tail[j0u - 1] } else { 0 };
-        let mut left_b: i32 = if j0u > 0 { b_tail[j0u - 1] } else { 0 };
+        let score_p = score_mat.as_mut_ptr();
+        let back_p = back_mat.as_mut_ptr();
+        let mut left_s: i64 = if j0u > 0 {
+            unsafe { *score_p.add(cur_base + j0u - 1) }
+        } else {
+            0
+        };
+        let mut left_b: u8 = if j0u > 0 {
+            unsafe { *back_p.add(cur_base + j0u - 1) }
+        } else {
+            0
+        };
 
-        let ps_cur = &s_head[prev_base + j0u..][..n];
-        let ps_next = &s_head[prev_base + j0u + 1..][..n];
-        let pb_next = &b_head[prev_base + j0u + 1..][..n];
-        let cs_out = &mut s_tail[j0u..][..n];
-        let cb_out = &mut b_tail[j0u..][..n];
-        let seq2 = &iseq2[(j0 + i + band_left - 1) as usize..][..n];
+        let seq2_base = (j0 + i + band_left - 1) as usize;
+        debug_assert!(seq2_base + n <= iseq2.len());
+        let ps_cur_p = unsafe { score_p.add(prev_base + j0u) };
+        let ps_next_p = unsafe { score_p.add(prev_base + j0u + 1) };
+        let pb_next_p = unsafe { back_p.add(prev_base + j0u + 1) };
+        let cs_out_p = unsafe { score_p.add(cur_base + j0u) };
+        let cb_out_p = unsafe { back_p.add(cur_base + j0u) };
+        let seq2_p = unsafe { iseq2.as_ptr().add(seq2_base) };
+        macro_rules! dp_cell {
+            ($k:expr, $j1:expr, $extra:expr, $do_left:expr, $do_top:expr) => {{
+                let k = $k;
+                let j1 = $j1;
+                let j = j1 + i + band_left;
 
-        for k in 0..n {
+                // SAFETY: all pointers are derived from slices of length `n`, and `k < n`.
+                let cj = unsafe { *seq2_p.add(k) } as usize;
+                let mut sij = unsafe { *mrow.get_unchecked(cj) } as i64;
+                //int iden_ij = (ci == cj);
+
+                sij += $extra * (sij > 0) as i64;
+
+                let mut back = DP_BACK_LEFT_TOP as u8;
+                let mut best_score1 = unsafe { *ps_cur_p.add(k) } + sij;
+                let gap0 = gap_open[((i == len1) | (j == len2)) as usize];
+
+                if $do_left {
+                    let gap = if left_b == DP_BACK_LEFT as u8 {
+                        mat.ext_gap
+                    } else {
+                        gap0
+                    };
+                    let score = left_s + gap as i64;
+                    if score > best_score1 {
+                        back = DP_BACK_LEFT as u8;
+                        best_score1 = score;
+                    }
+                }
+                if $do_top {
+                    let gap = if unsafe { *pb_next_p.add(k) } == DP_BACK_TOP as u8 {
+                        mat.ext_gap
+                    } else {
+                        gap0
+                    };
+                    let score = unsafe { *ps_next_p.add(k) } + gap as i64;
+                    if score > best_score1 {
+                        back = DP_BACK_TOP as u8;
+                        best_score1 = score;
+                    }
+                }
+                unsafe {
+                    *cs_out_p.add(k) = best_score1;
+                    *cb_out_p.add(k) = back;
+                }
+                left_s = best_score1;
+                left_b = back;
+            }};
+        }
+
+        let mut k = 0usize;
+        let top_true_end = if band_width - 1 > j0 {
+            ((band_width - 1 - j0) as usize).min(n)
+        } else {
+            0
+        };
+        if j0 == 0 {
+            if top_true_end > 0 {
+                let extra = 4 - (max_diag & 3) as i64;
+                dp_cell!(0usize, 0i32, extra, false, true);
+            } else {
+                let extra = 4 - (max_diag & 3) as i64;
+                dp_cell!(0usize, 0i32, extra, false, false);
+            }
+            k = 1;
+        }
+        // `j1` walks monotonically, so split around `max_diag` and avoid an absolute value
+        // in every DP cell when computing upstream's diagonal-distance bonus.
+        let top_left_end = if max_diag >= j0 {
+            top_true_end.min((max_diag - j0 + 1) as usize)
+        } else {
+            0
+        };
+        while k < top_left_end {
             let j1 = j0 + k as i32;
-            let j = j1 + i + band_left;
-
-            let cj = seq2[k] as usize;
-            let mut sij = mrow[cj] as i64;
-            //int iden_ij = (ci == cj);
-
-            /* extra score according to the distance to the best diagonal */
-            // Upstream indexes `extra_score[4] = {4,3,2,1}`; for an index in 0..=3 that is
-            // exactly `4 - index`, so the stack array and its per-cell load disappear.
-            let extra = 4 - ((j1 - max_diag).abs() & 3) as i64; // max distance 3
-            sij += extra * (sij > 0) as i64;
-
-            let mut back = DP_BACK_LEFT_TOP;
-            let mut best_score1 = ps_cur[k] + sij;
-            let gap0 = gap_open[((i == len1) | (j == len2)) as usize];
-            let mut gap;
-
-            if j1 > 0 {
-                gap = gap0;
-                if left_b == DP_BACK_LEFT {
-                    gap = mat.ext_gap;
-                }
-                let score = left_s + gap as i64;
-                if score > best_score1 {
-                    back = DP_BACK_LEFT;
-                    best_score1 = score;
-                }
-            }
-            if j1 + 1 < band_width {
-                gap = gap0;
-                if pb_next[k] == DP_BACK_TOP {
-                    gap = mat.ext_gap;
-                }
-                let score = ps_next[k] + gap as i64;
-                if score > best_score1 {
-                    back = DP_BACK_TOP;
-                    best_score1 = score;
-                }
-            }
-            cs_out[k] = best_score1;
-            cb_out[k] = back;
-            left_s = best_score1;
-            left_b = back;
+            let extra = 4 - ((max_diag - j1) & 3) as i64;
+            dp_cell!(k, j1, extra, true, true);
+            k += 1;
+        }
+        while k < top_true_end {
+            let j1 = j0 + k as i32;
+            let extra = 4 - ((j1 - max_diag) & 3) as i64;
+            dp_cell!(k, j1, extra, true, true);
+            k += 1;
+        }
+        let left_only_left_end = if max_diag >= j0 {
+            n.min((max_diag - j0 + 1) as usize)
+        } else {
+            0
+        };
+        while k < left_only_left_end {
+            let j1 = j0 + k as i32;
+            let extra = 4 - ((max_diag - j1) & 3) as i64;
+            dp_cell!(k, j1, extra, true, false);
+            k += 1;
+        }
+        while k < n {
+            let j1 = j0 + k as i32;
+            let extra = 4 - ((j1 - max_diag) & 3) as i64;
+            dp_cell!(k, j1, extra, true, false);
+            k += 1;
         }
     }
     let mut i;
@@ -2117,13 +2525,30 @@ pub fn local_band_align(
         j = len2;
     }
     let mut j1 = j - i - band_left;
+    let score_read_p = score_mat.as_ptr();
+    let back_read_p = back_mat.as_ptr();
+    let seq1_p = iseq1.as_ptr();
+    let seq2_p = iseq2.as_ptr();
+    let traceback_index = |i: i32, j1: i32| -> usize {
+        debug_assert!(i >= 0 && (i as usize) < rows);
+        debug_assert!(j1 >= 0 && (j1 as usize) < stride);
+        i as usize * stride + j1 as usize
+    };
+    let read_score = |i: i32, j1: i32| -> i64 {
+        // SAFETY: traceback follows back-pointers written inside the allocated DP band.
+        unsafe { *score_read_p.add(traceback_index(i, j1)) }
+    };
+    let read_back = |i: i32, j1: i32| -> u8 {
+        // SAFETY: traceback follows back-pointers written inside the allocated DP band.
+        unsafe { *back_read_p.add(traceback_index(i, j1)) }
+    };
     // COMPAT: upstream narrows the int64 cell into the `int&` out-parameter. Scores are
     // scaled by MAX_SEQ, so this genuinely truncates on long alignments; preserved.
-    *best_score = score_mat[i as usize * stride + j1 as usize] as i32;
-    let best_score1 = score_mat[i as usize * stride + j1 as usize];
+    let best_score1 = read_score(i, j1);
+    *best_score = best_score1 as i32;
 
     let has_alninfo = alninfo.is_some();
-    let mut back = back_mat[i as usize * stride + j1 as usize];
+    let mut back = read_back(i, j1);
     let mut last = back;
     let mut count = 0i32;
     let mut count2 = 0i32;
@@ -2147,13 +2572,13 @@ pub fn local_band_align(
     let mut masked = 0i32;
     let mut indels = 0i32;
     let mut max_indels = 0i32;
-    while back != DP_BACK_NONE {
-        match back {
+    while back != DP_BACK_NONE as u8 {
+        match back as i32 {
             DP_BACK_TOP => {
                 let bl = ((last != back) & (j != 1) & (j != len2)) as i32;
                 dlen += bl;
                 dcount += bl;
-                let score = score_mat[i as usize * stride + j1 as usize];
+                let score = read_score(i, j1);
                 if score < smin {
                     count2 = 0;
                     smin = score;
@@ -2168,7 +2593,7 @@ pub fn local_band_align(
                 let bl = ((last != back) & (i != 1) & (i != len1)) as i32;
                 dlen += bl;
                 dcount += bl;
-                let score = score_mat[i as usize * stride + j1 as usize];
+                let score = read_score(i, j1);
                 if score < smin {
                     count2 = 0;
                     smin = score;
@@ -2189,10 +2614,13 @@ pub fn local_band_align(
                         gend2 = j - 1;
                     }
                 }
-                let score = score_mat[i as usize * stride + j1 as usize];
+                let score = read_score(i, j1);
                 i -= 1;
                 j -= 1;
-                let is_match = iseq1[i as usize] == iseq2[j as usize];
+                debug_assert!(i >= 0 && (i as usize) < iseq1.len());
+                debug_assert!(j >= 0 && (j as usize) < iseq2.len());
+                let (c1, c2) = unsafe { (*seq1_p.add(i as usize), *seq2_p.add(j as usize)) };
+                let is_match = c1 == c2;
                 if score > smax {
                     count = 0;
                     smax = score;
@@ -2200,7 +2628,7 @@ pub fn local_band_align(
                     end1 = i;
                     end2 = j;
                 }
-                if options.is_est && (iseq1[i as usize] > 4 || iseq2[j as usize] > 4) {
+                if options.is_est && (c1 > 4 || c2 > 4) {
                     masked += 1;
                 } else {
                     dlen += 1;
@@ -2218,15 +2646,15 @@ pub fn local_band_align(
                     begin2 = j + mm;
                 }
             }
-            _ => println!("{}", back),
+            _ => cdhit_println!("{}", back),
         }
         if options.is_454 {
-            if back == DP_BACK_LEFT_TOP {
+            if back == DP_BACK_LEFT_TOP as u8 {
                 if indels > max_indels {
                     max_indels = indels;
                 }
                 indels = 0;
-            } else if last == DP_BACK_LEFT_TOP {
+            } else if last == DP_BACK_LEFT_TOP as u8 {
                 indels = 1;
             } else if indels != 0 {
                 indels += 1;
@@ -2234,7 +2662,7 @@ pub fn local_band_align(
         }
         pos += 1;
         last = back;
-        back = back_mat[i as usize * stride + j1 as usize];
+        back = read_back(i, j1);
     }
     if options.is_454 && max_indels > options.max_indel {
         return FAILED_FUNC;
@@ -2588,16 +3016,16 @@ impl WordTable {
                 continue;
             }
             cols += 1;
-            print!("{}\t{}\tsize:{}\t", k, i, size);
+            cdhit_print!("{}\t{}\tsize:{}\t", k, i, size);
             for ic in self.row_iter(i) {
-                print!("{},{} ", ic.index, ic.count);
+                cdhit_print!("{},{} ", ic.index, ic.count);
                 total_words += ic.count as i64;
             }
-            println!();
+            cdhit_println!();
             k += 1;
         }
 
-        println!("total cols: {} total words: {}", cols, total_words);
+        cdhit_println!("total cols: {} total words: {}", cols, total_words);
     }
 
     /// `WordTable::CountWords`
@@ -2625,6 +3053,14 @@ impl WordTable {
         // so re-loading `look_counts.items`' pointer through the struct on every hit is
         // worth avoiding.
         let items = &mut look_counts.items[..];
+        let items_p = items.as_mut_ptr();
+        let index_mapping_p = index_mapping.as_mut_ptr();
+        let row_head_p = self.row_head.as_ptr();
+        let arena_p = self.arena.as_ptr();
+        let row_head_len = self.row_head.len();
+        let arena_len = self.arena.len();
+        let index_mapping_len = index_mapping.len();
+        let items_len = items.len();
         let mut size = look_counts.size;
 
         let we = word_encodes;
@@ -2656,63 +3092,367 @@ impl WordTable {
         const PF_HEAD: usize = 24;
         const PF_ARENA: usize = 6;
         let end = (aan_no as usize).min(we.len()).min(wen.len());
-        for k in j0..end {
-            // SAFETY: `k < end <= we.len().min(wen.len())`.
-            let j = unsafe { *we.get_unchecked(k) };
-            let n = unsafe { *wen.get_unchecked(k) };
+        let aan_no_i32 = aan_no;
+        let min_i32 = min;
+        macro_rules! count_word {
+            ($k:expr) => {{
+                let k = $k;
+                // SAFETY: `k < end <= we.len().min(wen.len())`.
+                let j = unsafe { *we.get_unchecked(k) };
+                let n = unsafe { *wen.get_unchecked(k) };
 
-            if k + PF_HEAD < end {
-                let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
-                if w >= 0 {
-                    prefetch(&self.row_head[w as usize]);
-                }
-            }
-            if k + PF_ARENA < end {
-                let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
-                if w >= 0 {
-                    let o = self.row_head[w as usize];
-                    if o != NO_BLOCK {
-                        prefetch(&self.arena[o as usize]);
+                if n != 0 {
+                    let j1 = n as i32;
+                    let rest = aan_no_i32 - k as i32 + 1;
+                    debug_assert!(j >= 0);
+                    let word = j as usize;
+                    debug_assert!(word < row_head_len);
+                    // SAFETY: word encodes are generated against this table's alphabet,
+                    // and the debug assertion above documents the invariant that used to
+                    // be checked by slice indexing here.
+                    let off = unsafe { *row_head_p.add(word) };
+                    if off != NO_BLOCK {
+                        let base = off as usize;
+                        debug_assert!(base < arena_len);
+                        // SAFETY: non-empty row heads always point at an arena block header.
+                        let row_len = unsafe { (*arena_p.add(base)).count as usize };
+                        debug_assert!(base + 1 + row_len <= arena_len);
+                        // SAFETY: the block header's count is maintained by `push_entry`,
+                        // and entries live contiguously immediately after the header.
+                        let mut ic_p = unsafe { arena_p.add(base + 1) };
+                        let ic_end = unsafe { ic_p.add(row_len) };
+                        while ic_p < ic_end {
+                            let ic = unsafe { *ic_p };
+                            let c = if ic.count < j1 { ic.count } else { j1 };
+                            debug_assert!((ic.index as usize) < index_mapping_len);
+                            debug_assert!(size + 1 < items_len);
+                            // SAFETY: `ic.index` is a representative's position in
+                            // `table.sequences`, which never exceeds `max_sequences`;
+                            // `index_mapping` and `look_counts` are both sized `frag + 2`
+                            // for that same bound in `WorkingBuffer::set`. `size` counts
+                            // distinct representatives seen so far, so it too stays below
+                            // that bound, and `*idm - 1` is an index this loop wrote itself.
+                            let idm = unsafe { index_mapping_p.add(ic.index as usize) };
+                            if unsafe { *idm } == 0 {
+                                if rest < min_i32 {
+                                    ic_p = unsafe { ic_p.add(1) };
+                                    continue;
+                                }
+                                unsafe { *items_p.add(size) = IndexCount::new(ic.index, c) };
+                                size += 1;
+                                unsafe { *idm = size as u32 };
+                            } else {
+                                unsafe { (*items_p.add((*idm - 1) as usize)).count += c };
+                            }
+                            ic_p = unsafe { ic_p.add(1) };
+                        }
                     }
                 }
-            }
+            }};
+        }
 
-            let j1 = n as i32;
-            if j1 == 0 {
-                continue;
+        let mut k = j0;
+        let head_prefetch_end = end.saturating_sub(PF_HEAD);
+        while k < head_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
+            if w >= 0 {
+                prefetch(&self.row_head[w as usize]);
             }
-            let rest = aan_no - k as i32 + 1;
-            let off = self.row_head[j as usize];
-            if off == NO_BLOCK {
-                continue;
-            }
-            let base = off as usize;
-            let row_len = self.arena[base].count as usize;
-            for ic in &self.arena[base + 1..base + 1 + row_len] {
-                let c = if ic.count < j1 { ic.count } else { j1 };
-                debug_assert!((ic.index as usize) < index_mapping.len());
-                debug_assert!(size + 1 < items.len());
-                // SAFETY: `ic.index` is a representative's position in `table.sequences`,
-                // which never exceeds `max_sequences`; `index_mapping` and `look_counts`
-                // are both sized `frag + 2` for that same bound in `WorkingBuffer::set`.
-                // `size` counts distinct representatives seen so far, so it too stays below
-                // that bound, and `*idm - 1` is an index this loop wrote itself. This is the
-                // innermost loop of the program -- roughly half its run time -- and the
-                // three bounds checks are a measurable share of it.
-                let idm = unsafe { index_mapping.get_unchecked_mut(ic.index as usize) };
-                if *idm == 0 {
-                    if rest < min {
-                        continue;
-                    }
-                    unsafe { *items.get_unchecked_mut(size) = IndexCount::new(ic.index, c) };
-                    size += 1;
-                    *idm = size as u32;
-                } else {
-                    unsafe { items.get_unchecked_mut((*idm - 1) as usize).count += c };
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            if w >= 0 {
+                let o = self.row_head[w as usize];
+                if o != NO_BLOCK {
+                    prefetch(&self.arena[o as usize]);
                 }
             }
+            count_word!(k);
+            k += 1;
+        }
+        let arena_prefetch_end = end.saturating_sub(PF_ARENA);
+        while k < arena_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            if w >= 0 {
+                let o = self.row_head[w as usize];
+                if o != NO_BLOCK {
+                    prefetch(&self.arena[o as usize]);
+                }
+            }
+            count_word!(k);
+            k += 1;
+        }
+        while k < end {
+            count_word!(k);
+            k += 1;
         }
         look_counts.size = size;
+        look_counts.items[look_counts.size].count = 0;
+        OK_FUNC
+    }
+
+    /// Fast `CountWords` variant for the non-fragment protein path.
+    ///
+    /// When `frag_size == 0`, callers only need `look_counts` as a candidate list and
+    /// `index_mapping[rep]` as a marker to clear; they never need the 1-based
+    /// `index_mapping -> look_counts` indirection used by fragment windowing. Accumulate
+    /// counts directly in `index_mapping[rep]`, then materialise only candidates that
+    /// reached `min`. That removes the hottest dependent random write in `count_words` and
+    /// avoids sending impossible candidates to the alignment filter.
+    pub fn count_words_direct(
+        &self,
+        aan_no: i32,
+        word_encodes: &[i32],
+        word_encodes_no: &[INTs],
+        look_counts: &mut LookCounts,
+        index_mapping: &mut [u32],
+        min: i32,
+    ) -> i32 {
+        for j in 0..look_counts.size {
+            index_mapping[look_counts.items[j].index as usize] = 0;
+        }
+        look_counts.size = 0;
+
+        let items = &mut look_counts.items[..];
+        let items_p = items.as_mut_ptr();
+        let index_mapping_p = index_mapping.as_mut_ptr();
+        let row_head_p = self.row_head.as_ptr();
+        let arena_p = self.arena.as_ptr();
+        let row_head_len = self.row_head.len();
+        let arena_len = self.arena.len();
+        let index_mapping_len = index_mapping.len();
+        let items_len = items.len();
+        let mut size = 0usize;
+
+        let we = word_encodes;
+        let wen = word_encodes_no;
+        const PF_HEAD: usize = 24;
+        const PF_ARENA: usize = 6;
+        let end = (aan_no as usize).min(we.len()).min(wen.len());
+        let aan_no_i32 = aan_no;
+        let min_i32 = min;
+        macro_rules! count_word_direct {
+            ($k:expr) => {{
+                let k = $k;
+                let n = unsafe { *wen.get_unchecked(k) };
+                if n != 0 {
+                    let j = unsafe { *we.get_unchecked(k) };
+                    let j1 = n as i32;
+                    let rest = aan_no_i32 - k as i32 + 1;
+                    debug_assert!(j >= 0);
+                    let word = j as usize;
+                    debug_assert!(word < row_head_len);
+                    let off = unsafe { *row_head_p.add(word) };
+                    if off != NO_BLOCK {
+                        let base = off as usize;
+                        debug_assert!(base < arena_len);
+                        let row_len = unsafe { (*arena_p.add(base)).count as usize };
+                        debug_assert!(base + 1 + row_len <= arena_len);
+                        let mut ic_p = unsafe { arena_p.add(base + 1) };
+                        let ic_end = unsafe { ic_p.add(row_len) };
+                        while ic_p < ic_end {
+                            let ic = unsafe { *ic_p };
+                            let c = if ic.count < j1 { ic.count } else { j1 } as u32;
+                            let index = ic.index as usize;
+                            debug_assert!(index < index_mapping_len);
+                            debug_assert!(size + 1 < items_len);
+                            let count_p = unsafe { index_mapping_p.add(index) };
+                            let old = unsafe { *count_p };
+                            if old == 0 {
+                                if rest < min_i32 {
+                                    ic_p = unsafe { ic_p.add(1) };
+                                    continue;
+                                }
+                                unsafe { *items_p.add(size) = IndexCount::new(ic.index, 0) };
+                                size += 1;
+                            }
+                            unsafe { *count_p = old + c };
+                            ic_p = unsafe { ic_p.add(1) };
+                        }
+                    }
+                }
+            }};
+        }
+
+        let mut k = 0usize;
+        let head_prefetch_end = end.saturating_sub(PF_HEAD);
+        while k < head_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
+            debug_assert!(w >= 0);
+            prefetch(&self.row_head[w as usize]);
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            debug_assert!(w >= 0);
+            let o = self.row_head[w as usize];
+            if o != NO_BLOCK {
+                prefetch(&self.arena[o as usize]);
+            }
+            count_word_direct!(k);
+            k += 1;
+        }
+        let arena_prefetch_end = end.saturating_sub(PF_ARENA);
+        while k < arena_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            debug_assert!(w >= 0);
+            let o = self.row_head[w as usize];
+            if o != NO_BLOCK {
+                prefetch(&self.arena[o as usize]);
+            }
+            count_word_direct!(k);
+            k += 1;
+        }
+        while k < end {
+            count_word_direct!(k);
+            k += 1;
+        }
+
+        let mut kept = 0usize;
+        for j in 0..size {
+            let index = unsafe { (*items_p.add(j)).index };
+            let count_p = unsafe { index_mapping_p.add(index as usize) };
+            let count = unsafe { *count_p } as i32;
+            if count < min_i32 {
+                unsafe { *count_p = 0 };
+                continue;
+            }
+            unsafe { *items_p.add(kept) = IndexCount::new(index, count) };
+            kept += 1;
+        }
+        look_counts.size = kept;
+        look_counts.items[look_counts.size].count = 0;
+        OK_FUNC
+    }
+
+    /// Direct `CountWords` variant for the non-fragment nucleotide path.
+    ///
+    /// EST callers also consume `look_counts` only as a candidate list, clearing
+    /// `index_mapping[rep]` before threshold checks. This keeps the same direct
+    /// accumulation/materialisation strategy as `count_words_direct`, while preserving the
+    /// `est=true` leading-negative-word skip used for words containing `N`.
+    pub fn count_words_direct_est(
+        &self,
+        aan_no: i32,
+        word_encodes: &[i32],
+        word_encodes_no: &[INTs],
+        look_counts: &mut LookCounts,
+        index_mapping: &mut [u32],
+        min: i32,
+    ) -> i32 {
+        for j in 0..look_counts.size {
+            index_mapping[look_counts.items[j].index as usize] = 0;
+        }
+        look_counts.size = 0;
+
+        let items = &mut look_counts.items[..];
+        let items_p = items.as_mut_ptr();
+        let index_mapping_p = index_mapping.as_mut_ptr();
+        let row_head_p = self.row_head.as_ptr();
+        let arena_p = self.arena.as_ptr();
+        let row_head_len = self.row_head.len();
+        let arena_len = self.arena.len();
+        let index_mapping_len = index_mapping.len();
+        let items_len = items.len();
+        let mut size = 0usize;
+
+        let we = word_encodes;
+        let wen = word_encodes_no;
+        let mut j0 = 0usize;
+        while j0 < we.len() && we[j0] < 0 {
+            j0 += 1;
+        }
+
+        const PF_HEAD: usize = 24;
+        const PF_ARENA: usize = 6;
+        let end = (aan_no as usize).min(we.len()).min(wen.len());
+        let aan_no_i32 = aan_no;
+        let min_i32 = min;
+        macro_rules! count_word_direct {
+            ($k:expr) => {{
+                let k = $k;
+                let n = unsafe { *wen.get_unchecked(k) };
+                if n != 0 {
+                    let j = unsafe { *we.get_unchecked(k) };
+                    let j1 = n as i32;
+                    let rest = aan_no_i32 - k as i32 + 1;
+                    debug_assert!(j >= 0);
+                    let word = j as usize;
+                    debug_assert!(word < row_head_len);
+                    let off = unsafe { *row_head_p.add(word) };
+                    if off != NO_BLOCK {
+                        let base = off as usize;
+                        debug_assert!(base < arena_len);
+                        let row_len = unsafe { (*arena_p.add(base)).count as usize };
+                        debug_assert!(base + 1 + row_len <= arena_len);
+                        let mut ic_p = unsafe { arena_p.add(base + 1) };
+                        let ic_end = unsafe { ic_p.add(row_len) };
+                        while ic_p < ic_end {
+                            let ic = unsafe { *ic_p };
+                            let c = if ic.count < j1 { ic.count } else { j1 } as u32;
+                            let index = ic.index as usize;
+                            debug_assert!(index < index_mapping_len);
+                            debug_assert!(size + 1 < items_len);
+                            let count_p = unsafe { index_mapping_p.add(index) };
+                            let old = unsafe { *count_p };
+                            if old == 0 {
+                                if rest < min_i32 {
+                                    ic_p = unsafe { ic_p.add(1) };
+                                    continue;
+                                }
+                                unsafe { *items_p.add(size) = IndexCount::new(ic.index, 0) };
+                                size += 1;
+                            }
+                            unsafe { *count_p = old + c };
+                            ic_p = unsafe { ic_p.add(1) };
+                        }
+                    }
+                }
+            }};
+        }
+
+        let mut k = j0;
+        let head_prefetch_end = end.saturating_sub(PF_HEAD);
+        while k < head_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
+            if w >= 0 {
+                prefetch(&self.row_head[w as usize]);
+            }
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            if w >= 0 {
+                let o = self.row_head[w as usize];
+                if o != NO_BLOCK {
+                    prefetch(&self.arena[o as usize]);
+                }
+            }
+            count_word_direct!(k);
+            k += 1;
+        }
+        let arena_prefetch_end = end.saturating_sub(PF_ARENA);
+        while k < arena_prefetch_end {
+            let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
+            if w >= 0 {
+                let o = self.row_head[w as usize];
+                if o != NO_BLOCK {
+                    prefetch(&self.arena[o as usize]);
+                }
+            }
+            count_word_direct!(k);
+            k += 1;
+        }
+        while k < end {
+            count_word_direct!(k);
+            k += 1;
+        }
+
+        let mut kept = 0usize;
+        for j in 0..size {
+            let index = unsafe { (*items_p.add(j)).index };
+            let count_p = unsafe { index_mapping_p.add(index as usize) };
+            let count = unsafe { *count_p } as i32;
+            if count < min_i32 {
+                unsafe { *count_p = 0 };
+                continue;
+            }
+            unsafe { *items_p.add(kept) = IndexCount::new(index, count) };
+            kept += 1;
+        }
+        look_counts.size = kept;
         look_counts.items[look_counts.size].count = 0;
         OK_FUNC
     }
@@ -3265,14 +4005,14 @@ impl SequenceDB {
                 if one.size != 0 {
                     // write previous record
                     if one.identifier.is_empty() || one.format() != 0 {
-                        println!("Warning: from file \"{}\",", file);
-                        println!(
+                        cdhit_println!("Warning: from file \"{}\",", file);
+                        cdhit_println!(
                             "Discarding invalid sequence or sequence without identifier and description!\n"
                         );
                         if !one.identifier.is_empty() {
-                            println!("{}", String::from_utf8_lossy(&one.identifier));
+                            cdhit_println!("{}", String::from_utf8_lossy(&one.identifier));
                         }
-                        println!("{}", String::from_utf8_lossy(&one.data));
+                        cdhit_println!("{}", String::from_utf8_lossy(&one.data));
                         one.size = 0;
                         one.data.clear();
                     }
@@ -3446,28 +4186,28 @@ impl SequenceDB {
                 if one.size != 0 && two.size != 0 {
                     // write previous record
                     if one.identifier.is_empty() || one.format() != 0 {
-                        println!("Warning: from file \"{}\",", file);
-                        println!(
+                        cdhit_println!("Warning: from file \"{}\",", file);
+                        cdhit_println!(
                             "Discarding invalid sequence or sequence without identifier and description!\n"
                         );
                         if !one.identifier.is_empty() {
-                            println!("{}", String::from_utf8_lossy(&one.identifier));
+                            cdhit_println!("{}", String::from_utf8_lossy(&one.identifier));
                         }
-                        println!("{}", String::from_utf8_lossy(&one.data));
+                        cdhit_println!("{}", String::from_utf8_lossy(&one.data));
                         one.size = 0;
                         one.data.clear();
                         two.size = 0;
                         two.data.clear();
                     }
                     if two.identifier.is_empty() || two.format() != 0 {
-                        println!("Warning: from file \"{}\",", file2);
-                        println!(
+                        cdhit_println!("Warning: from file \"{}\",", file2);
+                        cdhit_println!(
                             "Discarding invalid sequence or sequence without identifier and description!\n"
                         );
                         if !two.identifier.is_empty() {
-                            println!("{}", String::from_utf8_lossy(&two.identifier));
+                            cdhit_println!("{}", String::from_utf8_lossy(&two.identifier));
                         }
-                        println!("{}", String::from_utf8_lossy(&two.data));
+                        cdhit_println!("{}", String::from_utf8_lossy(&two.data));
                         one.size = 0;
                         one.data.clear();
                         two.size = 0;
@@ -3715,7 +4455,7 @@ impl SequenceDB {
             }
         }
 
-        println!("writing clustering information");
+        cdhit_println!("writing clustering information");
         let m = self.rep_seqs.len();
         let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); m];
         for &s in sorting.iter() {
@@ -3781,7 +4521,7 @@ impl SequenceDB {
             }
         }
 
-        println!("writing clustering information");
+        cdhit_println!("writing clustering information");
         let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); n];
         for i in 0..n2 {
             let id = self.sequences[i].cluster_id;
@@ -3828,11 +4568,12 @@ impl SequenceDB {
         options.max_entries = self.max_len * MAX_TABLE_SEQ;
         // The `sizeof(INTs) <= 2` warning cannot trigger: INTs is 32-bit under LONG_SEQ.
 
-        println!(
+        cdhit_println!(
             "longest and shortest : {} and {}",
-            self.max_len, self.min_len
+            self.max_len,
+            self.min_len
         );
-        println!("Total letters: {}", self.total_letter);
+        cdhit_println!("Total letters: {}", self.total_letter);
         // END change all the NR_seq to iseq
 
         self.len_n50 = (self.max_len + self.min_len) / 2; // will be properly set, if sort is true;
@@ -3876,7 +4617,7 @@ impl SequenceDB {
                 }
             }
 
-            println!("Sequences have been sorted");
+            cdhit_println!("Sequences have been sorted");
             // END sort them from long to short
         }
     }
@@ -4357,6 +5098,7 @@ impl WorkingBuffer {
     /// `WorkingBuffer::ComputeAAP`
     pub fn compute_aap(&mut self, seqi: &[u8], size: i32, naa_tab: &Naa) {
         let naa1 = naa_tab.naa1();
+        self.simd.prepare_query_aa(seqi, size, naa1);
         let naa2 = naa_tab.naa2() as usize;
         let len1 = size - 1;
         for sk in 0..naa2 {
@@ -4516,10 +5258,10 @@ impl SequenceDB {
         self.sequences[id as usize] = seq;
         if (id + 1) % 1000 == 0 {
             let size = self.rep_seqs.len();
-            print!(".");
+            cdhit_print!(".");
             let _ = std::io::stdout().flush();
             if (id + 1) % 10000 == 0 {
-                println!("\r..........{:9}  finished  {:9}  clusters", id + 1, size);
+                cdhit_println!("\r..........{:9}  finished  {:9}  clusters", id + 1, size);
             }
         }
     }
@@ -4549,16 +5291,16 @@ impl SequenceDB {
         /// `sizeof(NVector<IndexCount>)`
         const SIZEOF_NVECTOR: usize = 16;
 
-        println!("\nApproximated minimal memory consumption:");
+        cdhit_println!("\nApproximated minimal memory consumption:");
         let mut mem = n * SIZEOF_SEQUENCE + self.total_desc as usize + n + extra;
         if !options.store_disk {
             mem += self.total_letter as usize + n;
         }
-        println!("{:<16}: {}M", "Sequence", mem / mega);
+        cdhit_println!("{:<16}: {}M", "Sequence", mem / mega);
         mem_need += mem;
 
         mem = bsize as usize;
-        println!(
+        cdhit_println!(
             "{:<16}: {} X {}M = {}M",
             "Buffer",
             t,
@@ -4568,7 +5310,7 @@ impl SequenceDB {
         mem_need += t as usize * mem;
 
         mem = f * (8 + 8) + self.naan as usize * SIZEOF_NVECTOR;
-        println!(
+        cdhit_println!(
             "{:<16}: {} X {}M = {}M",
             "Table",
             table,
@@ -4579,10 +5321,10 @@ impl SequenceDB {
 
         mem = cpp_vector_capacity(n) * 8 + n * 4;
         mem += comp_aan_idx_len * 4;
-        println!("{:<16}: {}M", "Miscellaneous", mem / mega);
+        cdhit_println!("{:<16}: {}M", "Miscellaneous", mem / mega);
         mem_need += mem;
 
-        println!("{:<16}: {}M\n", "Total", mem_need / mega);
+        cdhit_println!("{:<16}: {}M\n", "Total", mem_need / mega);
 
         if options.max_memory != 0 && options.max_memory < mem_need + 50 * table {
             bomb_error(&format!(
@@ -4658,9 +5400,9 @@ impl Options {
                 self.max_sequences = MAX_TABLE_SEQ;
             }
         }
-        println!("Table limit with the given memory limit:");
-        println!("Max number of representatives: {}", self.max_sequences);
-        println!(
+        cdhit_println!("Table limit with the given memory limit:");
+        cdhit_println!("Max number of representatives: {}", self.max_sequences);
+        cdhit_println!(
             "Max number of word counting entries: {}\n",
             self.max_entries
         );
@@ -4749,15 +5491,26 @@ pub fn check_one_aa(
     {
         let look_counts = &mut buf.look_counts;
         let index_mapping = &mut buf.index_mapping;
-        table.count_words(
-            aan_no,
-            &buf.word_encodes,
-            &buf.word_encodes_no,
-            look_counts,
-            index_mapping,
-            false,
-            param.required_aan,
-        );
+        if frag_size == 0 {
+            table.count_words_direct(
+                aan_no,
+                &buf.word_encodes,
+                &buf.word_encodes_no,
+                look_counts,
+                index_mapping,
+                param.required_aan,
+            );
+        } else {
+            table.count_words(
+                aan_no,
+                &buf.word_encodes,
+                &buf.word_encodes_no,
+                look_counts,
+                index_mapping,
+                false,
+                param.required_aan,
+            );
+        }
     }
 
     // contained_in_old_lib()
@@ -5074,23 +5827,21 @@ pub fn check_one_est(
             let look_counts = &mut buf.look_counts;
             let index_mapping = &mut buf.index_mapping;
             if comp != 0 {
-                table.count_words(
+                table.count_words_direct_est(
                     aan_no,
                     &buf.aan_list_comp,
                     &buf.word_encodes_no,
                     look_counts,
                     index_mapping,
-                    true,
                     param.required_aan,
                 );
             } else {
-                table.count_words(
+                table.count_words_direct_est(
                     aan_no,
                     &buf.word_encodes,
                     &buf.word_encodes_no,
                     look_counts,
                     index_mapping,
-                    true,
                     param.required_aan,
                 );
             }
@@ -5366,7 +6117,7 @@ impl SequenceDB {
             buf.compute_aap2(&seq.data, seq.size, naa_tab);
             dists[i][i] = 0.0;
             if (i + 1) % 1000 == 0 {
-                println!("{:9}", i + 1);
+                cdhit_println!("{:9}", i + 1);
             }
             for j in 0..i {
                 let rep = &self.sequences[j];
@@ -5755,7 +6506,7 @@ impl SequenceDB {
                     }
                 }
             }
-            println!("\rcomparing sequences from  {:9}  to  {:9}", i, m);
+            cdhit_println!("\rcomparing sequences from  {:9}  to  {:9}", i, m);
             let _ = std::io::stdout().flush();
             // `i` is upstream's outer cursor, seeded into `ks` once and then advanced so
             // the code after the loop knows where the block ended; the bound `m` is fixed.
@@ -5828,13 +6579,13 @@ impl SequenceDB {
             }
             word_table.clear();
         }
-        println!(
+        cdhit_println!(
             "\n{:9}  finished  {:9}  clusters",
             self.sequences.len(),
             self.rep_seqs.len()
         );
         let mem = (mem_need + tabsize * 8) / mega;
-        println!("\nApproximated maximum memory consumption: {}M", mem);
+        cdhit_println!("\nApproximated maximum memory consumption: {}M", mem);
         word_table.clear();
     }
 }
@@ -5957,10 +6708,10 @@ impl SequenceDB {
                 );
                 word_table.sequences.push(ks);
                 if (ks + 1) % 1000 == 0 {
-                    print!(".");
+                    cdhit_print!(".");
                     let _ = std::io::stdout().flush();
                     if (ks + 1) % 10000 == 0 {
-                        println!("{:9}  finished", ks + 1);
+                        cdhit_println!("{:9}  finished", ks + 1);
                     }
                 }
             }
@@ -5994,7 +6745,7 @@ impl SequenceDB {
                 t,
             );
 
-            println!("\r..........{:9}  compared  {:9}  clusters", i, nr2_red_no);
+            cdhit_println!("\r..........{:9}  compared  {:9}  clusters", i, nr2_red_no);
             word_table.clear();
             word_table.size = 0;
             i = m;
@@ -6019,8 +6770,8 @@ impl SequenceDB {
             }
         }
 
-        println!();
-        println!(
+        cdhit_println!();
+        cdhit_println!(
             "{} compared\t{} clustered",
             self.sequences.len(),
             nr2_red_no
@@ -6087,7 +6838,7 @@ fn screen_2d(
             let p = (100.0 * j as f32) / n as f32;
             if p > p0 + 1e-1 {
                 // print only if the percentage changed
-                print!("\r{:4.1}%", p);
+                cdhit_print!("\r{:4.1}%", p);
                 let _ = std::io::stdout().flush();
                 p0 = p;
             }
@@ -6548,3 +7299,119 @@ pub static NAA_STAT: [[[i32; 4]; 61]; 5] = [
 ];
 
 /////////////////////////// END ALL ////////////////////////
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar_aa_diag_counts(
+        naa1: i32,
+        query: &[u8],
+        rep: &[u8],
+        band_b: i32,
+        band_e: i32,
+    ) -> Vec<u64> {
+        let len1 = query.len() as i32;
+        let len2 = rep.len() as i32;
+        let nall = len1 + len2 - 1;
+        let mut diag = vec![0u64; nall as usize + 1];
+        for (i1, w) in (len1 - 1..).zip(rep.windows(2)) {
+            let c22 = w[0] as i32 * naa1 + w[1] as i32;
+            let cpx = 1 + (w[0] != w[1]) as i32;
+            let step = 1u64 | ((cpx as u64) << 32);
+            for b in 0..query.len() - 1 {
+                if query[b] as i32 * naa1 + query[b + 1] as i32 == c22 {
+                    let d = i1 - b as i32;
+                    if d >= band_b && d <= band_e {
+                        diag[d as usize] += step;
+                    }
+                }
+            }
+        }
+        diag[band_b as usize..=band_e as usize].to_vec()
+    }
+
+    fn scalar_nt_diag_counts(query: &[u8], rep: &[u8], band_b: i32, band_e: i32) -> Vec<u64> {
+        let len1 = query.len() as i32;
+        let len2 = rep.len() as i32;
+        let nall = len1 + len2 - 1;
+        let mut diag = vec![0u64; nall as usize + 1];
+        for (i1, w) in (len1 - 1..).zip(rep.windows(4)) {
+            if (w[0] | w[1] | w[2] | w[3]) >= 4 {
+                continue;
+            }
+            let cpx = 1 + (w[0] != w[1]) as i32 + (w[1] != w[2]) as i32 + (w[2] != w[3]) as i32;
+            let step = 1u64 | ((cpx as u64) << 32);
+            for b in 0..query.len() - 3 {
+                let q = &query[b..b + 4];
+                if q == w {
+                    let d = i1 - b as i32;
+                    if d >= band_b && d <= band_e {
+                        diag[d as usize] += step;
+                    }
+                }
+            }
+        }
+        diag[band_b as usize..=band_e as usize].to_vec()
+    }
+
+    #[test]
+    fn protein_simd_diag_count_matches_scalar_counts() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let naa = Naa::new(MAX_UAA);
+        let naa1 = naa.naa1();
+        let query = [0, 1, 0, 1, 2, 2, 0, 1, 20, 20, 1, 0, 1, 0];
+        let rep = [3, 0, 1, 0, 1, 2, 2, 2, 0, 1, 20, 20, 0, 1, 0, 4];
+        let mut simd = SimdDiag::default();
+        simd.prepare_query_aa(&query, query.len() as i32, naa1);
+
+        for (band_b, band_e) in [(0, 28), (4, 17), (12, 20)] {
+            assert!(simd_diag_count_aa(
+                &mut simd,
+                naa1,
+                &rep,
+                query.len() as i32,
+                rep.len() as i32,
+                band_b,
+                band_e
+            ));
+            let span = (band_e - band_b + 1) as usize;
+            let diag: Vec<u64> = (0..span)
+                .map(|i| simd.cnt[i] as u64 | ((simd.cpx[i] as u64) << 32))
+                .collect();
+            assert_eq!(
+                diag,
+                scalar_aa_diag_counts(naa1, &query, &rep, band_b, band_e)
+            );
+        }
+    }
+
+    #[test]
+    fn nucleotide_simd_diag_count_matches_scalar_counts() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let query = [0, 1, 2, 3, 0, 1, 2, 4, 0, 1, 2, 3, 3, 2, 1, 0];
+        let rep = [3, 0, 1, 2, 3, 0, 1, 2, 4, 0, 1, 2, 3, 3, 2, 1, 0, 2];
+        let mut simd = SimdDiag::default();
+        simd.prepare_query(&query, query.len() as i32);
+
+        for (band_b, band_e) in [(0, 32), (4, 20), (13, 24)] {
+            assert!(simd_diag_count(
+                &mut simd,
+                &rep,
+                query.len() as i32,
+                rep.len() as i32,
+                band_b,
+                band_e
+            ));
+            let span = (band_e - band_b + 1) as usize;
+            let diag: Vec<u64> = (0..span)
+                .map(|i| simd.cnt[i] as u64 | ((simd.cpx[i] as u64) << 32))
+                .collect();
+            assert_eq!(diag, scalar_nt_diag_counts(&query, &rep, band_b, band_e));
+        }
+    }
+}
