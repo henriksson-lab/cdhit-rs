@@ -1433,7 +1433,110 @@ pub fn diag_test_aapn(
         *best_sum = score;
         return OK_FUNC;
     }
+    diag_test_aapn_scalar(
+        naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right, band_b,
+        band_e, options,
+    )
+}
 
+/// [`diag_test_aapn`] that also returns [`max_window_count`] over `wide`, a diagonal range
+/// the pair cache needs (see `pair_cache::RoundCache::later_band`). Not upstream.
+///
+/// The vector path counts the union of this run's band and `wide` in one pass and scores the
+/// band from its slice of the counts, so the test's outputs are those of `diag_test_aapn`.
+#[allow(clippy::too_many_arguments)]
+pub fn diag_test_aapn_wide(
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    band_left: &mut i32,
+    band_center: &mut i32,
+    band_right: &mut i32,
+    required_aa1: i32,
+    options: &Options,
+    wide: (i32, i32),
+) -> i32 {
+    let nall = len1 + len2 - 1;
+    let band_b = (required_aa1 - 1).max(0);
+    let band_e = nall - band_b;
+    let (lo, hi) = (wide.0.min(band_b), wide.1.max(band_e));
+    if band_b <= band_e && simd_diag_count_aa(&mut buffer.simd, naa1, iseq2, len1, len2, lo, hi) {
+        let off = (band_b - lo) as usize;
+        let cnt = &buffer.simd.cnt[off..];
+        let cpx = &buffer.simd.cpx[off..];
+        let (score, left, center, right) =
+            finish_diag_band_u16(len1, nall, band_b, band_e, band_width, options, cnt, cpx);
+        *band_left = left;
+        *band_center = center;
+        *band_right = right;
+        *best_sum = score;
+        let c = &buffer.simd.cnt;
+        return max_window_by(|i| c[i] as u32, (wide.0 - lo) as usize, (wide.1 - lo) as usize, band_width);
+    }
+    diag_test_aapn(
+        naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right, required_aa1,
+        options,
+    );
+    max_window_count(&buffer.diag_score, wide.0, wide.1, band_width)
+}
+
+/// [`diag_test_aapn`], and with a pair cache, mark the pair if it fails every later run.
+#[allow(clippy::too_many_arguments)]
+fn cached_diag_test(
+    cache: Option<&crate::pair_cache::RoundCache<'_>>,
+    query_index: i32,
+    rep_index: i32,
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    (band_left, band_center, band_right): (&mut i32, &mut i32, &mut i32),
+    required_aa1: i32,
+    options: &Options,
+) {
+    let wide = cache.and_then(|pc| Some((pc, pc.later_band(len1, len1 + len2 - 1)?)));
+    match wide {
+        Some((pc, band)) => {
+            let most = diag_test_aapn_wide(
+                naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right,
+                required_aa1, options, band,
+            );
+            pc.mark_if_hopeless(query_index, rep_index, len1, most);
+        }
+        None => {
+            diag_test_aapn(
+                naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right,
+                required_aa1, options,
+            );
+        }
+    }
+}
+
+/// The scatter-based count behind [`diag_test_aapn`], for when the vector path declines.
+#[allow(clippy::too_many_arguments)]
+fn diag_test_aapn_scalar(
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    band_left: &mut i32,
+    band_center: &mut i32,
+    band_right: &mut i32,
+    band_b: i32,
+    band_e: i32,
+    options: &Options,
+) -> i32 {
+    let nall = len1 + len2 - 1;
     let taap = &buffer.taap;
     let aap_begin = &buffer.aap_begin;
     let aap_list = &buffer.aap_list;
@@ -1589,10 +1692,12 @@ pub fn diag_test_aapn(
 /// `band_width` wide, so it lies within one of these runs; with non-negative counts this
 /// bounds `best_sum` for any such band. Requires the counts in `[lo, hi]` to be this pair's.
 pub fn max_window_count(diag_score: &[u64], lo: i32, hi: i32, band_width: i32) -> i32 {
-    let (lo, hi) = (lo as usize, hi as usize);
+    max_window_by(|i| diag_score[i] as u32, lo as usize, hi as usize, band_width)
+}
+
+fn max_window_by(cnt: impl Fn(usize) -> u32, lo: usize, hi: usize, band_width: i32) -> i32 {
     let w = (band_width.max(1) as usize).min(hi - lo + 1);
-    let cnt = |i: usize| diag_score[i] as u32;
-    let mut sum: u32 = (lo..lo + w).map(cnt).sum();
+    let mut sum: u32 = (lo..lo + w).map(&cnt).sum();
     let mut most = sum;
     for j in lo + w..=hi {
         sum = sum + cnt(j) - cnt(j - w);
@@ -5820,7 +5925,7 @@ impl BestCandidateAa<'_> {
         let len = self.len;
         let mut param = self.param.clone();
         let capped = crate::twin::best_hit_is_capped(options);
-        let cache = self.g.pair_cache.filter(|_| self.use_cache && !simd_diag_supported());
+        let cache = self.g.pair_cache.filter(|_| self.use_cache);
         let mut best: Option<Hit> = None;
         let mut best_identity = self.entry_identity;
         let (mut band_left, mut band_center, mut band_right) = (0, 0, 0);
@@ -5851,7 +5956,10 @@ impl BestCandidateAa<'_> {
             if cache.is_some_and(|pc| pc.is_hopeless(self.seq_index, rep.index)) {
                 continue;
             }
-            diag_test_aapn(
+            cached_diag_test(
+                cache,
+                self.seq_index,
+                rep.index,
                 self.g.naa.naa1(),
                 &rep.data,
                 len,
@@ -5859,18 +5967,10 @@ impl BestCandidateAa<'_> {
                 buf,
                 &mut best_sum,
                 band_width1,
-                &mut band_left,
-                &mut band_center,
-                &mut band_right,
+                (&mut band_left, &mut band_center, &mut band_right),
                 param.required_aa1,
                 options,
             );
-            if let Some(pc) = cache {
-                if let Some((lo, hi)) = pc.later_band(len, len + len2 - 1) {
-                    let most = max_window_count(&buf.diag_score, lo, hi, band_width1);
-                    pc.mark_if_hopeless(self.seq_index, rep.index, len, most);
-                }
-            }
             if best_sum < param.required_aas {
                 continue;
             }
@@ -6158,16 +6258,18 @@ pub fn check_one_aa(
         } else {
             len + len2 - 2
         };
-        // Not upstream; see `pair_cache`. Its floors assume `len_eff == len`, and its bounds
-        // need the scalar path's clean counts over the whole diagonal range.
-        let cache = g.pair_cache.filter(|_| len_eff == len && !simd_diag_supported());
+        // Not upstream; see `pair_cache`. Its floors assume `len_eff == len`.
+        let cache = g.pair_cache.filter(|_| len_eff == len);
         if let Some(pc) = cache {
             if pc.is_hopeless(seq.index, db[rep_idx].index) {
                 ic_pos += 1;
                 continue;
             }
         }
-        diag_test_aapn(
+        cached_diag_test(
+            cache,
+            seq.index,
+            db[rep_idx].index,
             g.naa.naa1(),
             &db[rep_idx].data,
             len,
@@ -6175,18 +6277,10 @@ pub fn check_one_aa(
             buf,
             &mut best_sum,
             band_width1,
-            &mut band_left,
-            &mut band_center,
-            &mut band_right,
+            (&mut band_left, &mut band_center, &mut band_right),
             param.required_aa1,
             options,
         );
-        if let Some(pc) = cache {
-            if let Some((lo, hi)) = pc.later_band(len, len + len2 - 1) {
-                let most = max_window_count(&buf.diag_score, lo, hi, band_width1);
-                pc.mark_if_hopeless(seq.index, db[rep_idx].index, len, most);
-            }
-        }
         if best_sum < param.required_aas {
             ic_pos += 1;
             continue;
@@ -8079,6 +8173,50 @@ mod tests {
                 scalar_aa_diag_counts(naa1, &query, &rep, band_b, band_e)[..],
                 "len1={len1} len2={len2} band=[{band_b},{band_e}]"
             );
+        }
+    }
+
+    /// `diag_test_aapn_wide` must leave the test's outputs as `diag_test_aapn` does, and its
+    /// window maximum must be that of the naive counts over the wide range.
+    #[test]
+    fn wide_diag_test_matches_plain_and_naive_window() {
+        let naa = Naa::new(MAX_UAA);
+        let naa1 = naa.naa1();
+        let options = Options::default();
+        let mut buf = WorkingBuffer::new(10, 800, 1600, &options);
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..400 {
+            let alpha = 2 + next(20);
+            let len1 = 2 + next(600) as usize;
+            let len2 = len1 + next(200) as usize;
+            let query: Vec<u8> = (0..len1).map(|_| next(alpha) as u8).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| next(alpha) as u8).collect();
+            let nall = (len1 + len2 - 1) as i32;
+            let required_aa1 = next(len1 as u64 / 2 + 1) as i32;
+            let band_b = (required_aa1 - 1).max(0);
+            let lo = (band_b - next(band_b as u64 + 1) as i32 - 1).max(0);
+            let bw = 20.min(nall - 1);
+            buf.compute_aap(&query, len1 as i32, &naa);
+            let mut plain = (0, 0, 0, 0);
+            diag_test_aapn(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut plain.0, bw, &mut plain.1, &mut plain.2,
+                &mut plain.3, required_aa1, &options,
+            );
+            let mut wide = (0, 0, 0, 0);
+            let most = diag_test_aapn_wide(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut wide.0, bw, &mut wide.1, &mut wide.2,
+                &mut wide.3, required_aa1, &options, (lo, nall - lo),
+            );
+            assert_eq!(plain, wide, "len1={len1} len2={len2} req={required_aa1} lo={lo}");
+            let naive = scalar_aa_diag_counts(naa1, &query, &rep, lo, nall - lo);
+            let full: Vec<u64> = (0..=nall).map(|d| if d >= lo && d <= nall - lo { naive[(d - lo) as usize] } else { 0 }).collect();
+            assert_eq!(most, max_window_count(&full, lo, nall - lo, bw), "len1={len1} len2={len2} lo={lo}");
         }
     }
 
