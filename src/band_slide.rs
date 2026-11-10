@@ -35,20 +35,24 @@ pub(crate) fn slide(cnt: &[u16], cpx: &[u16], w: usize, j0: usize, j1: usize, st
 }
 
 /// Largest sum of `band_width` consecutive `cnt` values inside `cnt[lo..=hi]`, or of all of
-/// it if narrower. `simd` must only be true when AVX-512F is available.
-pub(crate) fn max_window(cnt: &[u16], lo: usize, hi: usize, band_width: i32, simd: bool) -> i32 {
+/// it if narrower; once a sum reaches `enough` it may stop and return any value `>= enough`.
+/// `simd` must only be true when AVX-512F is available.
+pub(crate) fn max_window(cnt: &[u16], lo: usize, hi: usize, band_width: i32, enough: i32, simd: bool) -> i32 {
     assert!(lo <= hi && hi < cnt.len());
     let w = (band_width.max(1) as usize).min(hi - lo + 1);
     let mut sum: i32 = cnt[lo..lo + w].iter().map(|&c| c as i32).sum();
     let mut most = sum;
     let mut j = lo + w;
     #[cfg(target_arch = "x86_64")]
-    if simd {
+    if simd && most < enough {
         // SAFETY: AVX-512F per the caller; every load ends at or before `hi`.
-        unsafe { (j, sum, most) = max_window_avx512(cnt, j, hi, w, sum, most) };
+        unsafe { (j, sum, most) = max_window_avx512(cnt, j, hi, w, sum, most, enough) };
     }
     let _ = simd;
     for j in j..=hi {
+        if most >= enough {
+            break;
+        }
         sum += cnt[j] as i32 - cnt[j - w] as i32;
         most = most.max(sum);
     }
@@ -58,10 +62,18 @@ pub(crate) fn max_window(cnt: &[u16], lo: usize, hi: usize, band_width: i32, sim
 /// Blocks of 16 windows of [`max_window`] from `j`; returns where it stopped and the state.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
-unsafe fn max_window_avx512(cnt: &[u16], mut j: usize, hi: usize, w: usize, mut sum: i32, mut most: i32) -> (usize, i32, i32) {
+unsafe fn max_window_avx512(
+    cnt: &[u16],
+    mut j: usize,
+    hi: usize,
+    w: usize,
+    mut sum: i32,
+    mut most: i32,
+    enough: i32,
+) -> (usize, i32, i32) {
     use core::arch::x86_64::*;
     let widen = |at: usize| _mm512_cvtepu16_epi32(_mm256_loadu_si256(cnt.as_ptr().add(at) as *const __m256i));
-    while j + 16 <= hi + 1 {
+    while j + 16 <= hi + 1 && most < enough {
         let d = _mm512_sub_epi32(widen(j), widen(j - w));
         let s = _mm512_add_epi32(prefix_sum(d), _mm512_set1_epi32(sum));
         most = most.max(_mm512_reduce_max_epi32(s));
@@ -226,11 +238,14 @@ mod tests {
             let lo = (xorshift(&mut s) % n as u64) as usize;
             let hi = lo + (xorshift(&mut s) % (n - lo) as u64) as usize;
             let bw = (xorshift(&mut s) % 45) as i32;
-            assert_eq!(
-                max_window(&cnt, lo, hi, bw, false),
-                max_window(&cnt, lo, hi, bw, true),
-                "case {case} n={n} lo={lo} hi={hi} bw={bw}"
-            );
+            let exact = max_window(&cnt, lo, hi, bw, i32::MAX, false);
+            assert_eq!(exact, max_window(&cnt, lo, hi, bw, i32::MAX, true), "case {case} n={n} lo={lo} hi={hi} bw={bw}");
+            let enough = (xorshift(&mut s) % 400) as i32;
+            for simd in [false, true] {
+                let got = max_window(&cnt, lo, hi, bw, enough, simd);
+                let ok = if exact < enough { got == exact } else { got >= enough };
+                assert!(ok, "case {case} simd={simd} enough={enough}: {got} vs exact {exact}");
+            }
         }
     }
 }

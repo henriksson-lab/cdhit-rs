@@ -226,10 +226,15 @@ impl RoundCache<'_> {
         (lo <= nall - lo).then_some((lo, nall - lo))
     }
 
+    /// Smallest `required_aas` of this or any later run for a query of `len1`.
+    pub fn floor(&self, len1: i32) -> Option<i32> {
+        self.floor_aas.get(len1 as usize).copied()
+    }
+
     /// Record the pair as hopeless if `max_window_count` (the largest match count of any
     /// `band_width`-wide window inside [`Self::later_band`]) is below every later floor.
     pub fn mark_if_hopeless(&self, query_index: i32, rep_index: i32, len1: i32, max_window_count: i32) {
-        let Some(&floor) = self.floor_aas.get(len1 as usize) else { return };
+        let Some(floor) = self.floor(len1) else { return };
         if self.last || max_window_count >= floor {
             return;
         }
