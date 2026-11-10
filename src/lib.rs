@@ -3,6 +3,7 @@
 //! Module layout mirrors the C++ sources one-to-one; see `NAMING.md` at the repository
 //! root for the name mapping and the small number of deliberate structural changes.
 
+mod band_slide;
 pub mod cdhit_common;
 pub mod cdhit_utility;
 /// Not upstream: persistent helper threads for [`window`].

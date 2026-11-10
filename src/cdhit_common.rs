@@ -1309,33 +1309,21 @@ fn finish_diag_band_u16(
         }
     }
 
-    let mut from_off = 0usize;
-    let mut end_off = initial_len - 1;
-    let mut score = best_score;
-    let mut score2 = best_score2;
-    let mut k = 0usize;
-    let mut j = initial_len;
+    let mut st = crate::band_slide::Slide {
+        score: best_score,
+        score2: best_score2,
+        best_score,
+        best_score2,
+        max_diag2,
+        imax_off,
+        from_off: 0,
+        end_off: initial_len - 1,
+    };
     let slide_end = (band_e - band_b) as usize;
-    while j < slide_end {
-        let (k0, k1) = diag!(k);
-        let (j0, j1) = diag!(j);
-        score -= k0;
-        score += j0;
-        score2 -= k1;
-        score2 += j1;
-        if score2 > best_score2 {
-            from_off = k + 1;
-            end_off = j;
-            best_score = score;
-            best_score2 = score2;
-            if j1 > max_diag2 {
-                max_diag2 = j1;
-                imax_off = j;
-            }
-        }
-        j += 1;
-        k += 1;
+    if initial_len < slide_end {
+        crate::band_slide::slide(cnt, cpx, initial_len, initial_len, slide_end, &mut st, simd_diag_supported());
     }
+    let crate::band_slide::Slide { mut best_score, imax_off, mut from_off, mut end_off, .. } = st;
 
     let imax_diag = band_b + imax_off as i32;
     let mlen = if imax_diag > len1 {
