@@ -34,6 +34,43 @@ pub(crate) fn slide(cnt: &[u16], cpx: &[u16], w: usize, j0: usize, j1: usize, st
     slide_scalar(cnt, cpx, w, j0, j1, st);
 }
 
+/// Largest sum of `band_width` consecutive `cnt` values inside `cnt[lo..=hi]`, or of all of
+/// it if narrower. `simd` must only be true when AVX-512F is available.
+pub(crate) fn max_window(cnt: &[u16], lo: usize, hi: usize, band_width: i32, simd: bool) -> i32 {
+    assert!(lo <= hi && hi < cnt.len());
+    let w = (band_width.max(1) as usize).min(hi - lo + 1);
+    let mut sum: i32 = cnt[lo..lo + w].iter().map(|&c| c as i32).sum();
+    let mut most = sum;
+    let mut j = lo + w;
+    #[cfg(target_arch = "x86_64")]
+    if simd {
+        // SAFETY: AVX-512F per the caller; every load ends at or before `hi`.
+        unsafe { (j, sum, most) = max_window_avx512(cnt, j, hi, w, sum, most) };
+    }
+    let _ = simd;
+    for j in j..=hi {
+        sum += cnt[j] as i32 - cnt[j - w] as i32;
+        most = most.max(sum);
+    }
+    most
+}
+
+/// Blocks of 16 windows of [`max_window`] from `j`; returns where it stopped and the state.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn max_window_avx512(cnt: &[u16], mut j: usize, hi: usize, w: usize, mut sum: i32, mut most: i32) -> (usize, i32, i32) {
+    use core::arch::x86_64::*;
+    let widen = |at: usize| _mm512_cvtepu16_epi32(_mm256_loadu_si256(cnt.as_ptr().add(at) as *const __m256i));
+    while j + 16 <= hi + 1 {
+        let d = _mm512_sub_epi32(widen(j), widen(j - w));
+        let s = _mm512_add_epi32(prefix_sum(d), _mm512_set1_epi32(sum));
+        most = most.max(_mm512_reduce_max_epi32(s));
+        sum += _mm512_reduce_add_epi32(d);
+        j += 16;
+    }
+    (j, sum, most)
+}
+
 fn slide_scalar(cnt: &[u16], cpx: &[u16], w: usize, j0: usize, j1: usize, st: &mut Slide) {
     let entering = cnt[j0..j1].iter().zip(&cpx[j0..j1]);
     let leaving = cnt[j0 - w..j1 - w].iter().zip(&cpx[j0 - w..j1 - w]);
@@ -174,6 +211,26 @@ mod tests {
             slide(&cnt, &cpx, w, w, j1, &mut a, false);
             slide(&cnt, &cpx, w, w, j1, &mut b, true);
             assert_eq!(a, b, "case {case} n={n} w={w} j1={j1}");
+        }
+    }
+
+    #[test]
+    fn max_window_simd_matches_scalar() {
+        if !(cfg!(target_arch = "x86_64") && std::is_x86_feature_detected!("avx512f")) {
+            return;
+        }
+        let mut s = 0x1234_5678_9ABC_DEF1u64;
+        for case in 0..20_000 {
+            let n = 1 + (xorshift(&mut s) % 900) as usize;
+            let cnt: Vec<u16> = (0..n).map(|_| (xorshift(&mut s) % 7).saturating_sub(4) as u16 * 50).collect();
+            let lo = (xorshift(&mut s) % n as u64) as usize;
+            let hi = lo + (xorshift(&mut s) % (n - lo) as u64) as usize;
+            let bw = (xorshift(&mut s) % 45) as i32;
+            assert_eq!(
+                max_window(&cnt, lo, hi, bw, false),
+                max_window(&cnt, lo, hi, bw, true),
+                "case {case} n={n} lo={lo} hi={hi} bw={bw}"
+            );
         }
     }
 }

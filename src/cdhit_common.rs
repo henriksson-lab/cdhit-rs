@@ -1474,8 +1474,8 @@ pub fn diag_test_aapn_wide(
         *band_center = center;
         *band_right = right;
         *best_sum = score;
-        let c = &buffer.simd.cnt;
-        return max_window_by(|i| c[i] as u32, (wide.0 - lo) as usize, (wide.1 - lo) as usize, band_width);
+        let (a, b) = ((wide.0 - lo) as usize, (wide.1 - lo) as usize);
+        return crate::band_slide::max_window(&buffer.simd.cnt, a, b, band_width, simd_diag_supported());
     }
     diag_test_aapn(
         naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right, required_aa1,
@@ -1692,12 +1692,10 @@ fn diag_test_aapn_scalar(
 /// `band_width` wide, so it lies within one of these runs; with non-negative counts this
 /// bounds `best_sum` for any such band. Requires the counts in `[lo, hi]` to be this pair's.
 pub fn max_window_count(diag_score: &[u64], lo: i32, hi: i32, band_width: i32) -> i32 {
-    max_window_by(|i| diag_score[i] as u32, lo as usize, hi as usize, band_width)
-}
-
-fn max_window_by(cnt: impl Fn(usize) -> u32, lo: usize, hi: usize, band_width: i32) -> i32 {
+    let (lo, hi) = (lo as usize, hi as usize);
     let w = (band_width.max(1) as usize).min(hi - lo + 1);
-    let mut sum: u32 = (lo..lo + w).map(&cnt).sum();
+    let cnt = |i: usize| diag_score[i] as u32;
+    let mut sum: u32 = (lo..lo + w).map(cnt).sum();
     let mut most = sum;
     for j in lo + w..=hi {
         sum = sum + cnt(j) - cnt(j - w);
