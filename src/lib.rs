@@ -6,6 +6,7 @@
 mod band_slide;
 pub mod cdhit_common;
 mod dense_words;
+mod est_codes;
 pub mod cdhit_utility;
 /// Not upstream: persistent helper threads for [`window`].
 pub mod fanout;

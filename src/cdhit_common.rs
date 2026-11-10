@@ -2247,18 +2247,7 @@ fn simd_diag_count(
             simd.ra.resize(total, 0xFF);
             simd.rb.resize(total, 0x00);
         }
-        for j in 0..nr {
-            let c0 = iseq2[j];
-            let c1 = iseq2[j + 1];
-            let c2 = iseq2[j + 2];
-            let c3 = iseq2[j + 3];
-            if (c0 | c1 | c2 | c3) >= 4 {
-                continue; // skip N, exactly as the scalar loop does
-            }
-            let code = (c0 << 6) | (c1 << 4) | (c2 << 2) | c3;
-            simd.ra[porg + j] = code;
-            simd.rb[porg + j] = code;
-        }
+        crate::est_codes::encode(&iseq2[..len2 as usize], &mut simd.ra, &mut simd.rb, porg, simd_diag_supported());
 
         let acc = span + 128;
         if simd.cnt.len() < acc {
