@@ -262,6 +262,8 @@ pub struct WordTable {
     pub is_aa: i8,
     pub size: usize,
     pub frag_count: i32,
+    /// Not upstream; see `dense_words`.
+    dense: crate::dense_words::DenseWords,
 }
 
 /// `struct Options`
@@ -3104,6 +3106,7 @@ impl WordTable {
             is_aa: 1,
             size: 0,
             frag_count: 0,
+            dense: Default::default(),
         };
         t.init(naa, naan);
         t
@@ -3122,6 +3125,7 @@ impl WordTable {
         self.naan = naan;
         self.row_head.clear();
         self.row_head.resize(naan as usize, NO_BLOCK);
+        self.dense.reset(naan);
     }
 
     /// `WordTable::Clear`
@@ -3137,6 +3141,7 @@ impl WordTable {
         for list in self.free.iter_mut() {
             list.clear();
         }
+        self.dense.reset(self.naan);
     }
 
     /// Not upstream. [`Self::clear`] for a table known to hold only `words`, without
@@ -3153,6 +3158,7 @@ impl WordTable {
         for list in self.free.iter_mut() {
             list.clear();
         }
+        self.dense.reset(self.naan);
     }
 
     /// Append one entry to word `j`, mirroring `indexCounts[j].Append(ic)`.
@@ -3232,6 +3238,10 @@ impl WordTable {
                 self.size += 1;
             }
         }
+        let entries = (0..aan_no as usize)
+            .filter(|&i| word_encodes_no[i] != 0 && !(skip_n && word_encodes[i] < 0))
+            .map(|i| (word_encodes[i], word_encodes_no[i]));
+        self.dense.add(idx, entries);
         OK_FUNC
     }
 
@@ -3247,6 +3257,8 @@ impl WordTable {
         frag: i32,
         frag_size: i32,
     ) -> i32 {
+        // fragment entries index fragments, not representatives
+        self.dense.reset(0);
         for i in 0..frag {
             let k = if (i + 1) * frag_size < aan_no {
                 (i + 1) * frag_size - 1
@@ -3606,6 +3618,20 @@ impl WordTable {
         }
         look_counts.size = 0;
 
+        let end = (aan_no as usize).min(word_encodes.len()).min(word_encodes_no.len());
+        if self.dense.is_live() {
+            let query = crate::dense_words::Query { words: &word_encodes[..end], counts: &word_encodes_no[..end] };
+            if let Some(hits) = self.dense.count(&query, from.max(0) as usize, min, simd_diag_supported()) {
+                for (j, &(index, count)) in hits.iter().enumerate() {
+                    look_counts.items[j] = IndexCount::new(index, count);
+                    index_mapping[index as usize] = count as u32;
+                }
+                look_counts.size = hits.len();
+                look_counts.items[hits.len()].count = 0;
+                return OK_FUNC;
+            }
+        }
+
         let items = &mut look_counts.items[..];
         let items_p = items.as_mut_ptr();
         let index_mapping_p = index_mapping.as_mut_ptr();
@@ -3621,7 +3647,6 @@ impl WordTable {
         let wen = word_encodes_no;
         const PF_HEAD: usize = 24;
         const PF_ARENA: usize = 6;
-        let end = (aan_no as usize).min(we.len()).min(wen.len());
         let aan_no_i32 = aan_no;
         let min_i32 = min;
         macro_rules! count_word_direct {
@@ -8128,6 +8153,40 @@ mod tests {
         }
     }
 
+    /// The vector count (with its per-representative query filter) against the naive count, on
+    /// random pairs and bands; one `SimdDiag` is reused so stale filtered lists would show.
+    #[test]
+    fn protein_simd_diag_count_matches_naive_on_random_pairs() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let naa1 = Naa::new(MAX_UAA).naa1();
+        let mut simd = SimdDiag::default();
+        let mut x: u64 = 0x3c6e_f372_fe94_f82b;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..400 {
+            let alpha = 2 + next(20);
+            let len1 = 2 + next(500) as usize;
+            let len2 = 2 + next(500) as usize;
+            let query: Vec<u8> = (0..len1).map(|_| next(alpha) as u8).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| next(alpha) as u8).collect();
+            simd.prepare_query_aa(&query, len1 as i32, naa1);
+            let nall = (len1 + len2 - 1) as i32;
+            let band_b = next(nall as u64 / 2 + 1) as i32;
+            let band_e = nall - band_b;
+            assert!(simd_diag_count_aa(&mut simd, naa1, &rep, len1 as i32, len2 as i32, band_b, band_e));
+            let diag: Vec<u64> = (0..(band_e - band_b + 1) as usize)
+                .map(|i| simd.cnt[i] as u64 | ((simd.cpx[i] as u64) << 32))
+                .collect();
+            assert_eq!(diag, scalar_aa_diag_counts(naa1, &query, &rep, band_b, band_e), "len1={len1} len2={len2}");
+        }
+    }
+
     /// The branch-light scalar scatter in `diag_test_aapn`, against the naive count. Queries
     /// of varying length reuse one buffer, so stale `aap_list` tails are exercised too.
     #[test]
@@ -8215,6 +8274,65 @@ mod tests {
             let naive = scalar_aa_diag_counts(naa1, &query, &rep, lo, nall - lo);
             let full: Vec<u64> = (0..=nall).map(|d| if d >= lo && d <= nall - lo { naive[(d - lo) as usize] } else { 0 }).collect();
             assert_eq!(most, max_window_count(&full, lo, nall - lo, bw), "len1={len1} len2={len2} lo={lo}");
+        }
+    }
+
+    /// `count_words_direct` through `dense_words` must list exactly what the posting walk
+    /// lists, in its order, with its counts, and leave `index_mapping` the same.
+    #[test]
+    fn dense_word_counts_match_the_posting_walk() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let mut x: u64 = 0xbb67_ae85_84ca_a73b;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        // sorted word codes with run multiplicities on the first slot, as `encode_words` makes
+        let words_of = |len: usize, alpha: u64, next: &mut dyn FnMut(u64) -> u64| {
+            let seq: Vec<i32> = (0..len).map(|_| next(alpha) as i32).collect();
+            let mut we: Vec<i32> = seq.windows(2).map(|w| w[0] * 21 + w[1]).collect();
+            we.sort_unstable();
+            let mut wen = vec![1u32; we.len()];
+            for j in (1..we.len()).rev() {
+                if we[j] == we[j - 1] {
+                    wen[j - 1] += wen[j];
+                    wen[j] = 0;
+                }
+            }
+            (we, wen)
+        };
+        for round in 0..30 {
+            let mut dense = WordTable::new(2, 441);
+            let mut walk = WordTable::new(2, 441);
+            let n = 1 + next(300) as usize;
+            for idx in 0..n {
+                let alpha = if round % 5 == 0 { 2 + next(4) } else { 21 };
+                let (we, wen) = words_of(3 + next(400) as usize, alpha, &mut next);
+                dense.add_word_counts(we.len() as i32, &we, &wen, idx as i32, false);
+                walk.add_word_counts(we.len() as i32, &we, &wen, idx as i32, false);
+            }
+            assert!(dense.dense.is_live());
+            walk.dense.reset(0);
+            let mut lc = (LookCounts { items: vec![IndexCount::default(); n + 2], size: 0 }, vec![0u32; n + 2]);
+            let mut lw = (LookCounts { items: vec![IndexCount::default(); n + 2], size: 0 }, vec![0u32; n + 2]);
+            for _ in 0..40 {
+                // a 1-letter alphabet over 600 residues pushes a word past the 255 byte limit
+                let (len, alpha) = if next(10) == 0 { (600, 1) } else { (3 + next(400) as usize, 2 + next(20)) };
+                let (we, wen) = words_of(len, alpha, &mut next);
+                let aan_no = we.len() as i32;
+                let min = next(aan_no as u64 + 2) as i32 - 1;
+                let from = next(n as u64) as i32 - (n as i32) / 4;
+                dense.count_words_direct(aan_no, &we, &wen, &mut lc.0, &mut lc.1, min, from);
+                walk.count_words_direct(aan_no, &we, &wen, &mut lw.0, &mut lw.1, min, from);
+                // the terminator's `index` is stale scratch; callers stop at its zero count
+                assert_eq!(lc.0.items[..lc.0.size], lw.0.items[..lw.0.size], "n={n} len={len} min={min} from={from}");
+                assert_eq!((lc.0.items[lc.0.size].count, lw.0.items[lw.0.size].count), (0, 0));
+                assert_eq!(lc.1, lw.1, "index_mapping, n={n} len={len} min={min} from={from}");
+            }
         }
     }
 
