@@ -5,6 +5,14 @@
 
 pub mod cdhit_common;
 pub mod cdhit_utility;
+/// Not upstream: persistent helper threads for [`window`].
+pub mod fanout;
+/// Not upstream: skip pairs proven hopeless by an earlier run over the same sequences.
+pub mod pair_cache;
+/// Not upstream: under `-g 1`, a copy of an earlier sequence starts from that one's result.
+pub mod twin;
+/// Not upstream: a block's sequences checked a window at a time on all threads.
+pub mod window;
 
 // One module per C++ front-end, each holding that program's `main` as
 // `pub fn main(argv: &[String])`. They are dispatched by `src/bin/cdhit.rs`, and are public
