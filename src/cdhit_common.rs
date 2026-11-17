@@ -189,6 +189,49 @@ fn word_block_class(cap: u32) -> u32 {
     (cap / WORD_BLOCK0).trailing_zeros()
 }
 
+/// Not upstream. When a `count_words_direct*` scan calls [`WordTable::finish_survivors`]:
+/// after the word at `next_check`, the first being where a candidate needs `min / 32` words
+/// already, then at each doubling of that.
+struct SurvivorSchedule {
+    next_check: usize,
+    needed: i32,
+    min: i32,
+    end: usize,
+    /// last word index at which a new candidate can still be admitted
+    open_until: i64,
+}
+
+impl SurvivorSchedule {
+    fn new(aan_no: i32, end: usize, min: i32) -> Self {
+        let mut s = SurvivorSchedule {
+            next_check: usize::MAX,
+            needed: (min / 32).max(4),
+            min,
+            end,
+            open_until: aan_no as i64 + 1 - min as i64,
+        };
+        s.place();
+        s
+    }
+
+    fn advance(&mut self) {
+        self.needed = self.needed.saturating_mul(2);
+        self.place();
+    }
+
+    /// After word `k` the rest can add `end - k - 1`, so `needed` is reached at this `k`.
+    fn place(&mut self) {
+        let k = self.end as i64 - 1 - self.min as i64 + self.needed as i64;
+        // with under an eighth of the words left there is too little to save
+        let late = (self.end as i64 - k) * 8 < self.end as i64;
+        self.next_check = if self.needed >= self.min || k <= self.open_until || k < 0 || late {
+            usize::MAX
+        } else {
+            k as usize
+        };
+    }
+}
+
 /// `class WordTable`
 pub struct WordTable {
     /// `indexCounts`: for each word code, the arena offset of its block of entries
@@ -219,6 +262,8 @@ pub struct WordTable {
     pub is_aa: i8,
     pub size: usize,
     pub frag_count: i32,
+    /// Not upstream; see `dense_words`.
+    dense: crate::dense_words::DenseWords,
 }
 
 /// `struct Options`
@@ -372,6 +417,8 @@ pub struct WorkingParam {
     /// `required_aas` (a.k.a. aa2).
     pub required_aas: i32,
     pub required_aan: i32,
+    /// Not upstream; see [`crate::twin`]. Set by the caller for one `check_one` call.
+    pub twin: crate::twin::TwinSkip,
 }
 
 /// `lookCounts` plus its `size` field. `WordTable::count_words` resets the logical length to
@@ -1264,33 +1311,21 @@ fn finish_diag_band_u16(
         }
     }
 
-    let mut from_off = 0usize;
-    let mut end_off = initial_len - 1;
-    let mut score = best_score;
-    let mut score2 = best_score2;
-    let mut k = 0usize;
-    let mut j = initial_len;
+    let mut st = crate::band_slide::Slide {
+        score: best_score,
+        score2: best_score2,
+        best_score,
+        best_score2,
+        max_diag2,
+        imax_off,
+        from_off: 0,
+        end_off: initial_len - 1,
+    };
     let slide_end = (band_e - band_b) as usize;
-    while j < slide_end {
-        let (k0, k1) = diag!(k);
-        let (j0, j1) = diag!(j);
-        score -= k0;
-        score += j0;
-        score2 -= k1;
-        score2 += j1;
-        if score2 > best_score2 {
-            from_off = k + 1;
-            end_off = j;
-            best_score = score;
-            best_score2 = score2;
-            if j1 > max_diag2 {
-                max_diag2 = j1;
-                imax_off = j;
-            }
-        }
-        j += 1;
-        k += 1;
+    if initial_len < slide_end {
+        crate::band_slide::slide(cnt, cpx, initial_len, initial_len, slide_end, &mut st, simd_diag_supported());
     }
+    let crate::band_slide::Slide { mut best_score, imax_off, mut from_off, mut end_off, .. } = st;
 
     let imax_diag = band_b + imax_off as i32;
     let mlen = if imax_diag > len1 {
@@ -1384,11 +1419,10 @@ pub fn diag_test_aapn(
     }; // on dec 21 2001
     let band_e = nall - band_b;
 
-    // Upstream clears all `nall` diagonals before counting. Only `[band_b, band_e]` is ever
-    // read back, though -- the scans below never look outside it -- so clearing just that
-    // range is equivalent. Counting is the expensive half; on AVX-512 hardware the
-    // vectorised form computes the same packed counters for this readable range and skips
-    // the scalar scatter loop.
+    // Upstream clears all `nall` diagonals before counting. The vector path below only
+    // counts `[band_b, band_e]`, which its scan never leaves. Counting is the expensive half;
+    // on AVX-512 hardware the vectorised form computes the same packed counters for this
+    // readable range and skips the scalar scatter loop.
     let simd_done = simd_diag_count_aa(&mut buffer.simd, naa1, iseq2, len1, len2, band_b, band_e);
     if simd_done {
         let cnt = &buffer.simd.cnt;
@@ -1401,43 +1435,169 @@ pub fn diag_test_aapn(
         *best_sum = score;
         return OK_FUNC;
     }
+    diag_test_aapn_scalar(
+        naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right, band_b,
+        band_e, options,
+    )
+}
 
+/// [`diag_test_aapn`] that also returns [`max_window_count`] over `wide`, a diagonal range
+/// the pair cache needs (see `pair_cache::RoundCache::later_band`). Not upstream.
+///
+/// `wide` must contain the band, so `best_sum` (one band window's count) is a lower bound of
+/// the maximum: once that or the scan reaches `enough`, it returns some value `>= enough`.
+///
+/// The vector path counts the union of this run's band and `wide` in one pass and scores the
+/// band from its slice of the counts, so the test's outputs are those of `diag_test_aapn`.
+#[allow(clippy::too_many_arguments)]
+pub fn diag_test_aapn_wide(
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    band_left: &mut i32,
+    band_center: &mut i32,
+    band_right: &mut i32,
+    required_aa1: i32,
+    options: &Options,
+    wide: (i32, i32),
+    enough: i32,
+) -> i32 {
+    let nall = len1 + len2 - 1;
+    let band_b = (required_aa1 - 1).max(0);
+    let band_e = nall - band_b;
+    let (lo, hi) = (wide.0.min(band_b), wide.1.max(band_e));
+    if band_b <= band_e && simd_diag_count_aa(&mut buffer.simd, naa1, iseq2, len1, len2, lo, hi) {
+        let off = (band_b - lo) as usize;
+        let cnt = &buffer.simd.cnt[off..];
+        let cpx = &buffer.simd.cpx[off..];
+        let (score, left, center, right) =
+            finish_diag_band_u16(len1, nall, band_b, band_e, band_width, options, cnt, cpx);
+        *band_left = left;
+        *band_center = center;
+        *band_right = right;
+        *best_sum = score;
+        if score >= enough {
+            return score;
+        }
+        let (a, b) = ((wide.0 - lo) as usize, (wide.1 - lo) as usize);
+        return crate::band_slide::max_window(&buffer.simd.cnt, a, b, band_width, enough, simd_diag_supported());
+    }
+    diag_test_aapn(
+        naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right, required_aa1,
+        options,
+    );
+    if *best_sum >= enough {
+        return *best_sum;
+    }
+    max_window_count(&buffer.diag_score, wide.0, wide.1, band_width)
+}
+
+/// [`diag_test_aapn`], and with a pair cache, mark the pair if it fails every later run.
+#[allow(clippy::too_many_arguments)]
+fn cached_diag_test(
+    cache: Option<&crate::pair_cache::RoundCache<'_>>,
+    query_index: i32,
+    rep_index: i32,
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    (band_left, band_center, band_right): (&mut i32, &mut i32, &mut i32),
+    required_aa1: i32,
+    options: &Options,
+) {
+    let wide = cache.and_then(|pc| Some((pc, pc.later_band(len1, len1 + len2 - 1)?)));
+    match wide {
+        Some((pc, band)) => {
+            let most = diag_test_aapn_wide(
+                naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right,
+                required_aa1, options, band, pc.floor(len1).unwrap_or(i32::MIN),
+            );
+            pc.mark_if_hopeless(query_index, rep_index, len1, most);
+        }
+        None => {
+            diag_test_aapn(
+                naa1, iseq2, len1, len2, buffer, best_sum, band_width, band_left, band_center, band_right,
+                required_aa1, options,
+            );
+        }
+    }
+}
+
+/// The scatter-based count behind [`diag_test_aapn`], for when the vector path declines.
+#[allow(clippy::too_many_arguments)]
+fn diag_test_aapn_scalar(
+    naa1: i32,
+    iseq2: &[u8],
+    len1: i32,
+    len2: i32,
+    buffer: &mut WorkingBuffer,
+    best_sum: &mut i32,
+    band_width: i32,
+    band_left: &mut i32,
+    band_center: &mut i32,
+    band_right: &mut i32,
+    band_b: i32,
+    band_e: i32,
+    options: &Options,
+) -> i32 {
+    let nall = len1 + len2 - 1;
     let taap = &buffer.taap;
     let aap_begin = &buffer.aap_begin;
     let aap_list = &buffer.aap_list;
     let diag_score = &mut buffer.diag_score;
 
-    if band_b <= band_e {
-        diag_score[band_b as usize..=band_e as usize].fill(0);
-    }
+    // All `nall`, as upstream, not just the band: when no in-band diagonal has a hit,
+    // `imax_diag` stays 0 and the trim below reads under `band_b`. Clearing only the band
+    // left the previous pair's counts there, so a result could depend on which pair came
+    // before -- and `pair_cache` needs clean counts over a wider range anyway.
+    diag_score[..=nall as usize].fill(0);
 
+    // Branch-light scatter. A representative 2-mer occurs 0, 1 or 2 times in the query at the
+    // vast majority of positions, and branching on that count mispredicted on nearly every
+    // position. So the first two query occurrences are always scattered, weighted by
+    // `step * (count > k)`: an absent occurrence adds 0. Its index is clamped to the last
+    // query word, which is a real position, so the (zero) add lands on a valid diagonal.
+    let nw = (len1 - 1).max(1) as usize;
+    debug_assert!(nw <= aap_list.len());
+    // a 1-residue query has no 2-mers, so nothing matches and its `aap_list` is stale
+    let scan_len = if len1 >= 2 { len2 as usize } else { 0 };
     let mut i1 = len1 - 1;
-    for w in iseq2[..len2 as usize].windows(2) {
+    for w in iseq2[..scan_len].windows(2) {
         let c22 = ((w[0] as i32) * naa1 + w[1] as i32) as usize;
         debug_assert!(c22 < taap.len() && c22 < aap_begin.len());
         // SAFETY: residues are < naa1, so `c22 < naa1^2`, and `WorkingBuffer::set` sizes
         // both arrays to at least `MAX_UAA^2` (441).
-        let j = unsafe { *taap.get_unchecked(c22) };
-        if j == 0 {
-            i1 += 1;
-            continue;
-        }
-        let cpx = 1 + (w[0] != w[1]) as i32;
-        let step = 1u64 | ((cpx as u64) << 32);
+        let j = unsafe { *taap.get_unchecked(c22) } as usize;
+        let cpx = 1 + (w[0] != w[1]) as u64;
+        let step = 1u64 | (cpx << 32);
         // SAFETY: as above.
         let m = unsafe { *aap_begin.get_unchecked(c22) } as usize;
         // SAFETY: `compute_aap`/`compute_aap2` fill `aap_list` so that
         // `aap_begin[c22] + taap[c22]` never exceeds the number of words in seq1, which is
-        // at most `aap_list.len()`.
-        debug_assert!(m + j as usize <= aap_list.len());
-        for &b in unsafe { aap_list.get_unchecked(m..m + j as usize) } {
-            let d = (i1 - b as i32) as usize;
-            debug_assert!(d < nall as usize);
-            // SAFETY: `aap_list` holds positions in seq1, so `0 <= b <= len1 - 2`, and
-            // `len1 - 1 <= i1 <= len1 + len2 - 3`. Hence `1 <= d <= len1 + len2 - 3 < nall`,
-            // and the array was just sized and zeroed to `nall`. This is the innermost loop
-            // of the whole program at low identity thresholds.
-            unsafe { *diag_score.get_unchecked_mut(d) += step };
+        // at most `aap_list.len()`; clamped indices are below `nw`.
+        debug_assert!(m + j <= aap_list.len());
+        // SAFETY (all scatters): `aap_list[..nw]` holds positions in seq1, so
+        // `0 <= b <= len1 - 2`, and `len1 - 1 <= i1 <= len1 + len2 - 3`. Hence
+        // `1 <= d <= len1 + len2 - 3 < nall`, and the array was just sized to `nall`. This
+        // is the innermost loop of the whole program at low identity thresholds.
+        let b0 = unsafe { *aap_list.get_unchecked(m.min(nw - 1)) };
+        let b1 = unsafe { *aap_list.get_unchecked((m + 1).min(nw - 1)) };
+        unsafe {
+            *diag_score.get_unchecked_mut((i1 - b0 as i32) as usize) += step * (j > 0) as u64;
+            *diag_score.get_unchecked_mut((i1 - b1 as i32) as usize) += step * (j > 1) as u64;
+        }
+        if j > 2 {
+            for &b in unsafe { aap_list.get_unchecked(m + 2..m + j) } {
+                unsafe { *diag_score.get_unchecked_mut((i1 - b as i32) as usize) += step };
+            }
         }
         i1 += 1;
     }
@@ -1536,6 +1696,25 @@ pub fn diag_test_aapn(
     OK_FUNC
 }
 // END diag_test_aapn
+
+/// The largest match count (low half of `diag_score`) over any `band_width`-wide run of
+/// diagonals inside `[lo, hi]` -- or over all of it, if narrower. Not upstream.
+///
+/// Every window `diag_test_aapn` scores for a band inside `[lo, hi]` is at most
+/// `band_width` wide, so it lies within one of these runs; with non-negative counts this
+/// bounds `best_sum` for any such band. Requires the counts in `[lo, hi]` to be this pair's.
+pub fn max_window_count(diag_score: &[u64], lo: i32, hi: i32, band_width: i32) -> i32 {
+    let (lo, hi) = (lo as usize, hi as usize);
+    let w = (band_width.max(1) as usize).min(hi - lo + 1);
+    let cnt = |i: usize| diag_score[i] as u32;
+    let mut sum: u32 = (lo..lo + w).map(cnt).sum();
+    let mut most = sum;
+    for j in lo + w..=hi {
+        sum = sum + cnt(j) - cnt(j - w);
+        most = most.max(sum);
+    }
+    most as i32
+}
 
 /// Scratch for the vectorised form of the nucleotide diagonal test.
 ///
@@ -1870,6 +2049,117 @@ unsafe fn simd_diag_kernel<const NT: usize>(
     }
 }
 
+/// AVX2 form of [`simd_diag_kernel`]: 32-diagonal tiles. Same transposed count, so the
+/// counters are identical; it exists because without AVX-512 the scalar 4-mer scatter in
+/// `diag_test_aapn_est` is nearly all of `cd-hit-est` time once `-c` drops to ~0.9.
+///
+/// # Safety
+/// As [`simd_diag_kernel`] with `NT * 64` replaced by `NT * 32`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn simd_diag_kernel_avx2<const NT: usize>(
+    simd: &SimdDiag,
+    ra: *const u8,
+    rb: *const u8,
+    porg: isize,
+    o0: isize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    use core::arch::x86_64::*;
+    for w in 1..5usize {
+        let bs = &simd.grp_b[w];
+        let cs = &simd.grp_c[w];
+        let nb = bs.len();
+        let wv = _mm256_set1_epi16(w as i16);
+        let mut i = 0usize;
+        while i < nb {
+            let stop = (i + 255).min(nb);
+            let mut acc = [_mm256_setzero_si256(); NT];
+            while i < stop {
+                let qc = *cs.get_unchecked(i);
+                let b = *bs.get_unchecked(i) as isize;
+                let base = if qc == 0xFF { rb } else { ra };
+                let p = base.offset(porg + b + o0);
+                let qv = _mm256_set1_epi8(qc as i8);
+                for (t, a) in acc.iter_mut().enumerate() {
+                    let rv = _mm256_loadu_si256(p.add(t * 32) as *const __m256i);
+                    // equal bytes are all-ones (-1), so subtracting counts them
+                    *a = _mm256_sub_epi8(*a, _mm256_cmpeq_epi8(qv, rv));
+                }
+                i += 1;
+            }
+            for (t, a) in acc.iter().enumerate() {
+                let lo = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(*a));
+                let hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(*a, 1));
+                let cp = cnt.add(t * 32);
+                let pp = cpx.add(t * 32);
+                let c0 = _mm256_loadu_si256(cp as *const __m256i);
+                let c1 = _mm256_loadu_si256(cp.add(16) as *const __m256i);
+                _mm256_storeu_si256(cp as *mut __m256i, _mm256_add_epi16(c0, lo));
+                _mm256_storeu_si256(cp.add(16) as *mut __m256i, _mm256_add_epi16(c1, hi));
+                let q0 = _mm256_loadu_si256(pp as *const __m256i);
+                let q1 = _mm256_loadu_si256(pp.add(16) as *const __m256i);
+                _mm256_storeu_si256(pp as *mut __m256i, _mm256_add_epi16(q0, _mm256_mullo_epi16(lo, wv)));
+                _mm256_storeu_si256(
+                    pp.add(16) as *mut __m256i,
+                    _mm256_add_epi16(q1, _mm256_mullo_epi16(hi, wv)),
+                );
+            }
+        }
+    }
+}
+
+/// [`simd_diag_dispatch`] for the AVX2 kernel: at most 8 tiles (256 diagonals) per pass, so
+/// the accumulators stay in registers.
+///
+/// # Safety
+/// As [`simd_diag_kernel_avx2`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn simd_diag_dispatch_avx2(
+    simd: &SimdDiag,
+    ra: *const u8,
+    rb: *const u8,
+    porg: isize,
+    o0: isize,
+    span: usize,
+    cnt: *mut u16,
+    cpx: *mut u16,
+) {
+    let mut done = 0usize;
+    while done < span {
+        let take = (span - done).min(8 * 32);
+        let (o, c, p) = (o0 + done as isize, cnt.add(done), cpx.add(done));
+        match take.div_ceil(32) {
+            1 => simd_diag_kernel_avx2::<1>(simd, ra, rb, porg, o, c, p),
+            2 => simd_diag_kernel_avx2::<2>(simd, ra, rb, porg, o, c, p),
+            3 => simd_diag_kernel_avx2::<3>(simd, ra, rb, porg, o, c, p),
+            4 => simd_diag_kernel_avx2::<4>(simd, ra, rb, porg, o, c, p),
+            5 => simd_diag_kernel_avx2::<5>(simd, ra, rb, porg, o, c, p),
+            6 => simd_diag_kernel_avx2::<6>(simd, ra, rb, porg, o, c, p),
+            7 => simd_diag_kernel_avx2::<7>(simd, ra, rb, porg, o, c, p),
+            _ => simd_diag_kernel_avx2::<8>(simd, ra, rb, porg, o, c, p),
+        }
+        done += take;
+    }
+}
+
+/// Whether some vector kernel can run the nucleotide diagonal count: AVX-512BW, else AVX2.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn simd_diag_nt_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::sync::OnceLock;
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| simd_diag_supported() || is_x86_feature_detected!("avx2"))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Pick the unrolled kernel for `span`, chunking when the span exceeds the widest one.
 ///
 /// # Safety
@@ -1937,7 +2227,7 @@ fn simd_diag_count(
     #[cfg(target_arch = "x86_64")]
     {
         // `cnt` can reach `len1` and `cpx` four times that; both are u16.
-        if len1 > SIMD_DIAG_MAX_LEN1 || !simd_diag_supported() {
+        if len1 > SIMD_DIAG_MAX_LEN1 || !simd_diag_nt_supported() {
             return false;
         }
         if band_b > band_e || len2 < 4 || len1 < 4 {
@@ -1957,18 +2247,7 @@ fn simd_diag_count(
             simd.ra.resize(total, 0xFF);
             simd.rb.resize(total, 0x00);
         }
-        for j in 0..nr {
-            let c0 = iseq2[j];
-            let c1 = iseq2[j + 1];
-            let c2 = iseq2[j + 2];
-            let c3 = iseq2[j + 3];
-            if (c0 | c1 | c2 | c3) >= 4 {
-                continue; // skip N, exactly as the scalar loop does
-            }
-            let code = (c0 << 6) | (c1 << 4) | (c2 << 2) | c3;
-            simd.ra[porg + j] = code;
-            simd.rb[porg + j] = code;
-        }
+        crate::est_codes::encode(&iseq2[..len2 as usize], &mut simd.ra, &mut simd.rb, porg, simd_diag_supported());
 
         let acc = span + 128;
         if simd.cnt.len() < acc {
@@ -1985,7 +2264,12 @@ fn simd_diag_count(
         // SAFETY: `ra`/`rb` are `total` bytes and the padding above covers every offset the
         // kernel forms; `cnt`/`cpx` hold `span + 128` elements, at least `NT * 64`.
         unsafe {
-            simd_diag_dispatch(
+            let dispatch = if simd_diag_supported() {
+                simd_diag_dispatch
+            } else {
+                simd_diag_dispatch_avx2
+            };
+            dispatch(
                 simd,
                 simd.ra.as_ptr(),
                 simd.rb.as_ptr(),
@@ -2821,6 +3105,7 @@ impl WordTable {
             is_aa: 1,
             size: 0,
             frag_count: 0,
+            dense: Default::default(),
         };
         t.init(naa, naan);
         t
@@ -2839,6 +3124,7 @@ impl WordTable {
         self.naan = naan;
         self.row_head.clear();
         self.row_head.resize(naan as usize, NO_BLOCK);
+        self.dense.reset(naan);
     }
 
     /// `WordTable::Clear`
@@ -2854,6 +3140,24 @@ impl WordTable {
         for list in self.free.iter_mut() {
             list.clear();
         }
+        self.dense.reset(self.naan);
+    }
+
+    /// Not upstream. [`Self::clear`] for a table known to hold only `words`, without
+    /// touching the other rows: `window` empties a small table thousands of times.
+    pub(crate) fn clear_words(&mut self, words: impl Iterator<Item = i32>) {
+        for word in words {
+            if word >= 0 {
+                self.row_head[word as usize] = NO_BLOCK;
+            }
+        }
+        self.size = 0;
+        self.sequences.clear();
+        self.arena.clear();
+        for list in self.free.iter_mut() {
+            list.clear();
+        }
+        self.dense.reset(self.naan);
     }
 
     /// Append one entry to word `j`, mirroring `indexCounts[j].Append(ic)`.
@@ -2933,6 +3237,10 @@ impl WordTable {
                 self.size += 1;
             }
         }
+        let entries = (0..aan_no as usize)
+            .filter(|&i| word_encodes_no[i] != 0 && !(skip_n && word_encodes[i] < 0))
+            .map(|i| (word_encodes[i], word_encodes_no[i]));
+        self.dense.add(idx, entries);
         OK_FUNC
     }
 
@@ -2948,6 +3256,8 @@ impl WordTable {
         frag: i32,
         frag_size: i32,
     ) -> i32 {
+        // fragment entries index fragments, not representatives
+        self.dense.reset(0);
         for i in 0..frag {
             let k = if (i + 1) * frag_size < aan_no {
                 (i + 1) * frag_size - 1
@@ -3189,6 +3499,96 @@ impl WordTable {
         OK_FUNC
     }
 
+    /// Not upstream. Mid-scan shortcut for the `count_words_direct*` loops, for a point past
+    /// which no new candidate is admitted (`rest < min`). The words from `next` on can add at
+    /// most `end - next` to a count (each sorted run of equal words carries its multiplicity
+    /// on its first slot), so a candidate further than that below `min` is dropped now
+    /// instead of by the final pass. If few enough remain, their counts are completed by
+    /// looking each one up in the remaining rows -- a row is in ascending index order --
+    /// rather than walking those rows in full. Returns whether the counts are complete.
+    ///
+    /// # Safety
+    /// `items` and `index_mapping` are the loops' live buffers: `*size` initialised items,
+    /// each indexing into the mapping. Admission must be closed (`rest < min`) and
+    /// `we[next..end]` must hold no negative (masked) word.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn finish_survivors(
+        &self,
+        next: usize,
+        end: usize,
+        we: &[i32],
+        wen: &[INTs],
+        items: *mut IndexCount,
+        size: &mut usize,
+        index_mapping: *mut u32,
+        min: i32,
+    ) -> bool {
+        let shortfall = min - (end - next) as i32;
+        let alive = |j: usize| (*index_mapping.add((*items.add(j)).index as usize) as i32) >= shortfall;
+        // a long list where a sample says most would stay is not worth walking yet
+        const SAMPLE: usize = 64;
+        if *size > 4 * SAMPLE && (0..SAMPLE).filter(|s| alive(s * (*size / SAMPLE))).count() > SAMPLE / 8 {
+            return false;
+        }
+        let mut kept = 0usize;
+        for j in 0..*size {
+            let item = *items.add(j);
+            let count = index_mapping.add(item.index as usize);
+            if (*count as i32) < shortfall {
+                *count = 0;
+            } else {
+                *items.add(kept) = item;
+                kept += 1;
+            }
+        }
+        *size = kept;
+        if kept == 0 {
+            return true;
+        }
+        // mean row length stands in for the rows still to come
+        let row = self.size / self.row_head.len().max(1);
+        if kept * (row.max(1).ilog2() as usize + 4) * 2 > row {
+            return false;
+        }
+        let survivors = std::slice::from_raw_parts(items, kept);
+        for k in next..end {
+            let n = wen[k] as i32;
+            if n == 0 {
+                continue;
+            }
+            let off = self.row_head[we[k] as usize];
+            if off == NO_BLOCK {
+                continue;
+            }
+            let base = off as usize;
+            let row = &self.arena[base + 1..base + 1 + self.arena[base].count as usize];
+            for item in survivors {
+                if let Ok(p) = row.binary_search_by_key(&item.index, |e| e.index) {
+                    *index_mapping.add(item.index as usize) += row[p].count.min(n) as u32;
+                }
+            }
+        }
+        true
+    }
+
+    /// Not upstream. Position, in a query's sorted word list, of the first word the
+    /// representative at table `index` also has: what orders `count_words_direct*`'s
+    /// candidates, ahead of the table index.
+    pub fn first_word_with(&self, index: i32, aan_no: i32, we: &[i32], wen: &[INTs]) -> Option<usize> {
+        (0..aan_no as usize).find(|&k| {
+            if wen[k] == 0 || we[k] < 0 {
+                return false;
+            }
+            let off = self.row_head[we[k] as usize];
+            if off == NO_BLOCK {
+                return false;
+            }
+            let base = off as usize;
+            let row = &self.arena[base + 1..base + 1 + self.arena[base].count as usize];
+            row.binary_search_by_key(&index, |e| e.index).is_ok()
+        })
+    }
+
     /// Fast `CountWords` variant for the non-fragment protein path.
     ///
     /// When `frag_size == 0`, callers only need `look_counts` as a candidate list and
@@ -3197,6 +3597,11 @@ impl WordTable {
     /// counts directly in `index_mapping[rep]`, then materialise only candidates that
     /// reached `min`. That removes the hottest dependent random write in `count_words` and
     /// avoids sending impossible candidates to the alignment filter.
+    ///
+    /// `from` (not upstream; see `twin`) leaves out representatives at table indices below
+    /// it. Rows are in ascending index order, so each row is entered by binary search and the
+    /// candidates that remain keep their counts and their relative order.
+    #[allow(clippy::too_many_arguments)]
     pub fn count_words_direct(
         &self,
         aan_no: i32,
@@ -3205,11 +3610,26 @@ impl WordTable {
         look_counts: &mut LookCounts,
         index_mapping: &mut [u32],
         min: i32,
+        from: i32,
     ) -> i32 {
         for j in 0..look_counts.size {
             index_mapping[look_counts.items[j].index as usize] = 0;
         }
         look_counts.size = 0;
+
+        let end = (aan_no as usize).min(word_encodes.len()).min(word_encodes_no.len());
+        if self.dense.is_live() {
+            let query = crate::dense_words::Query { words: &word_encodes[..end], counts: &word_encodes_no[..end] };
+            if let Some(hits) = self.dense.count(&query, from.max(0) as usize, min, simd_diag_supported()) {
+                for (j, &(index, count)) in hits.iter().enumerate() {
+                    look_counts.items[j] = IndexCount::new(index, count);
+                    index_mapping[index as usize] = count as u32;
+                }
+                look_counts.size = hits.len();
+                look_counts.items[hits.len()].count = 0;
+                return OK_FUNC;
+            }
+        }
 
         let items = &mut look_counts.items[..];
         let items_p = items.as_mut_ptr();
@@ -3226,7 +3646,6 @@ impl WordTable {
         let wen = word_encodes_no;
         const PF_HEAD: usize = 24;
         const PF_ARENA: usize = 6;
-        let end = (aan_no as usize).min(we.len()).min(wen.len());
         let aan_no_i32 = aan_no;
         let min_i32 = min;
         macro_rules! count_word_direct {
@@ -3248,6 +3667,10 @@ impl WordTable {
                         debug_assert!(base + 1 + row_len <= arena_len);
                         let mut ic_p = unsafe { arena_p.add(base + 1) };
                         let ic_end = unsafe { ic_p.add(row_len) };
+                        if from > 0 {
+                            let row = unsafe { std::slice::from_raw_parts(ic_p, row_len) };
+                            ic_p = unsafe { ic_p.add(row.partition_point(|e| e.index < from)) };
+                        }
                         while ic_p < ic_end {
                             let ic = unsafe { *ic_p };
                             let c = if ic.count < j1 { ic.count } else { j1 } as u32;
@@ -3272,9 +3695,23 @@ impl WordTable {
             }};
         }
 
+        let mut survivors = SurvivorSchedule::new(aan_no, end, min);
+        let mut finished = false;
+        macro_rules! step {
+            ($k:expr) => {{
+                count_word_direct!($k);
+                if $k == survivors.next_check {
+                    finished = unsafe {
+                        self.finish_survivors($k + 1, end, we, wen, items_p, &mut size, index_mapping_p, min)
+                    };
+                    survivors.advance();
+                }
+            }};
+        }
+
         let mut k = 0usize;
         let head_prefetch_end = end.saturating_sub(PF_HEAD);
-        while k < head_prefetch_end {
+        while k < head_prefetch_end && !finished {
             let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
             debug_assert!(w >= 0);
             prefetch(&self.row_head[w as usize]);
@@ -3284,22 +3721,22 @@ impl WordTable {
             if o != NO_BLOCK {
                 prefetch(&self.arena[o as usize]);
             }
-            count_word_direct!(k);
+            step!(k);
             k += 1;
         }
         let arena_prefetch_end = end.saturating_sub(PF_ARENA);
-        while k < arena_prefetch_end {
+        while k < arena_prefetch_end && !finished {
             let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
             debug_assert!(w >= 0);
             let o = self.row_head[w as usize];
             if o != NO_BLOCK {
                 prefetch(&self.arena[o as usize]);
             }
-            count_word_direct!(k);
+            step!(k);
             k += 1;
         }
-        while k < end {
-            count_word_direct!(k);
+        while k < end && !finished {
+            step!(k);
             k += 1;
         }
 
@@ -3406,9 +3843,23 @@ impl WordTable {
             }};
         }
 
+        let mut survivors = SurvivorSchedule::new(aan_no, end, min);
+        let mut finished = false;
+        macro_rules! step {
+            ($k:expr) => {{
+                count_word_direct!($k);
+                if $k == survivors.next_check {
+                    finished = unsafe {
+                        self.finish_survivors($k + 1, end, we, wen, items_p, &mut size, index_mapping_p, min)
+                    };
+                    survivors.advance();
+                }
+            }};
+        }
+
         let mut k = j0;
         let head_prefetch_end = end.saturating_sub(PF_HEAD);
-        while k < head_prefetch_end {
+        while k < head_prefetch_end && !finished {
             let w = unsafe { *we.get_unchecked(k + PF_HEAD) };
             if w >= 0 {
                 prefetch(&self.row_head[w as usize]);
@@ -3420,11 +3871,11 @@ impl WordTable {
                     prefetch(&self.arena[o as usize]);
                 }
             }
-            count_word_direct!(k);
+            step!(k);
             k += 1;
         }
         let arena_prefetch_end = end.saturating_sub(PF_ARENA);
-        while k < arena_prefetch_end {
+        while k < arena_prefetch_end && !finished {
             let w = unsafe { *we.get_unchecked(k + PF_ARENA) };
             if w >= 0 {
                 let o = self.row_head[w as usize];
@@ -3432,11 +3883,11 @@ impl WordTable {
                     prefetch(&self.arena[o as usize]);
                 }
             }
-            count_word_direct!(k);
+            step!(k);
             k += 1;
         }
-        while k < end {
-            count_word_direct!(k);
+        while k < end && !finished {
+            step!(k);
             k += 1;
         }
 
@@ -5176,6 +5627,8 @@ pub struct Globals<'a> {
     pub naa: &'a Naa,
     /// `Comp_AAN_idx`: word code -> reverse-complement word code. Empty when `-r 0`.
     pub comp_aan_idx: &'a [i32],
+    /// Not upstream: pairs proven hopeless by earlier runs; see [`crate::pair_cache`].
+    pub pair_cache: Option<&'a crate::pair_cache::RoundCache<'a>>,
 }
 
 /// Capacity of a `Vector<T>` after `n` calls to `Vector::Append`, which reserves
@@ -5195,6 +5648,31 @@ pub fn cpp_vector_capacity(n_appends: usize) -> usize {
 }
 
 impl SequenceDB {
+    /// Not upstream; see [`crate::twin`]. Sequence `j`'s skip against the table of the block
+    /// starting at `block_start`, given that sequences before `done` are final. Copies the
+    /// twin's result into `j` if the twin became final in this block. `None`: the twin is
+    /// not final yet, so `j` must not be screened.
+    pub(crate) fn twin_skip(
+        &mut self,
+        twins: &[u32],
+        block_start: usize,
+        done: usize,
+        j: usize,
+    ) -> Option<crate::twin::TwinSkip> {
+        let t = match twins.get(j) {
+            Some(&t) if t != crate::twin::NO_TWIN => t as usize,
+            _ => return Some(Default::default()),
+        };
+        if t >= done {
+            return None;
+        }
+        if t < block_start {
+            return Some(Default::default());
+        }
+        let (head, tail) = self.sequences.split_at_mut(j);
+        Some(crate::twin::inherit(&mut tail[0], t, &head[t], &self.rep_seqs))
+    }
+
     /// `SequenceDB::ClusterOne`
     pub fn cluster_one(
         &mut self,
@@ -5256,6 +5734,11 @@ impl SequenceDB {
             }
         }
         self.sequences[id as usize] = seq;
+        self.report_progress(id);
+    }
+
+    /// The progress dots `ClusterOne` prints after each sequence.
+    pub(crate) fn report_progress(&self, id: i32) {
         if (id + 1) % 1000 == 0 {
             let size = self.rep_seqs.len();
             cdhit_print!(".");
@@ -5426,6 +5909,144 @@ pub fn check_one(
     check_one_aa(seq, db, table, param, buf, g)
 }
 
+/// An accepted candidate of [`BestCandidateAa`].
+#[derive(Clone, Copy)]
+struct Hit {
+    /// position in the candidate list
+    pos: usize,
+    identity: f32,
+    distance: f32,
+    cluster_id: i32,
+    coverage: [i32; 4],
+}
+
+/// Not upstream. The candidate loop of [`check_one_aa`] for the options `window::covers`
+/// accepts (`-g 1` over whole sequences), where the choice is a pure fold: the first
+/// candidate of greatest identity. That is the form [`crate::twin`] reasons about.
+struct BestCandidateAa<'a> {
+    items: &'a [IndexCount],
+    seq_data: &'a [u8],
+    seq_index: i32,
+    len: i32,
+    /// the sequence's identity on entry: only a candidate above it can win, or one equal
+    /// to it under `keep_ties`
+    entry_identity: f32,
+    db: &'a [Sequence],
+    table: &'a WordTable,
+    /// as `check_one_aa` set it up for this sequence
+    param: &'a WorkingParam,
+    g: Globals<'a>,
+    keep_ties: bool,
+    /// the pair cache's floors hold for this sequence
+    use_cache: bool,
+}
+
+impl BestCandidateAa<'_> {
+    fn judge(&self, buf: &mut WorkingBuffer) -> Option<Hit> {
+        let options = self.g.options;
+        let len = self.len;
+        let mut param = self.param.clone();
+        let capped = crate::twin::best_hit_is_capped(options);
+        let cache = self.g.pair_cache.filter(|_| self.use_cache);
+        let mut best: Option<Hit> = None;
+        let mut best_identity = self.entry_identity;
+        let (mut band_left, mut band_center, mut band_right) = (0, 0, 0);
+        let (mut best_score, mut best_sum, mut alnln, mut tiden_no) = (0, 0, 0, 0);
+        let mut distance = 0.0f32;
+        let mut talign_info = [0i32; 5];
+        let mut has_aap = false;
+
+        for (pos, ic) in self.items.iter().enumerate() {
+            if ic.count < param.required_aan {
+                continue;
+            }
+            let rep_idx = self.table.sequences[ic.index as usize];
+            if rep_idx >= param.twin.before {
+                continue;
+            }
+            let rep = &self.db[rep_idx];
+            let len2 = rep.size;
+            if len2 > param.len_upper_bound {
+                continue;
+            }
+            param.control_long_coverage(len2, options);
+            if !has_aap {
+                buf.compute_aap(self.seq_data, len, self.g.naa);
+                has_aap = true;
+            }
+            let band_width1 = options.band_width.min(len + len2 - 2);
+            if cache.is_some_and(|pc| pc.is_hopeless(self.seq_index, rep.index)) {
+                continue;
+            }
+            cached_diag_test(
+                cache,
+                self.seq_index,
+                rep.index,
+                self.g.naa.naa1(),
+                &rep.data,
+                len,
+                len2,
+                buf,
+                &mut best_sum,
+                band_width1,
+                (&mut band_left, &mut band_center, &mut band_right),
+                param.required_aa1,
+                options,
+            );
+            if best_sum < param.required_aas {
+                continue;
+            }
+            let rc = local_band_align(
+                self.seq_data,
+                &rep.data,
+                len,
+                len2,
+                self.g.mat,
+                &mut best_score,
+                &mut tiden_no,
+                &mut alnln,
+                &mut distance,
+                Some(&mut talign_info),
+                band_left,
+                band_center,
+                band_right,
+                buf,
+                options,
+            );
+            if rc == FAILED_FUNC || tiden_no < param.required_aa1 {
+                continue;
+            }
+            let len_eff1 = if !options.global_identity { alnln } else { len - talign_info[4] };
+            let tiden_pc = tiden_no as f32 / len_eff1 as f32;
+            if (tiden_pc as f64) < options.cluster_thd {
+                continue;
+            }
+            let tie = self.keep_ties && best.is_none() && tiden_pc == self.entry_identity;
+            if tiden_pc <= best_identity && !tie {
+                continue;
+            }
+            if param.aln_cover_flag != 0
+                && (talign_info[3] - talign_info[2] + 1 < param.min_aln_len_l
+                    || talign_info[1] - talign_info[0] + 1 < param.min_aln_len_s)
+            {
+                continue;
+            }
+            best_identity = tiden_pc;
+            best = Some(Hit {
+                pos,
+                identity: tiden_pc,
+                distance,
+                cluster_id: rep.cluster_id,
+                coverage: [talign_info[0] + 1, talign_info[1] + 1, talign_info[2] + 1, talign_info[3] + 1],
+            });
+            if capped && tiden_pc >= 1.0 {
+                break;
+            }
+        }
+        best
+    }
+}
+
 /// `SequenceDB::CheckOneAA`
 pub fn check_one_aa(
     seq: &mut Sequence,
@@ -5449,8 +6070,25 @@ pub fn check_one_aa(
     let frag_size = options.frag_size;
 
     let naa = options.naa;
-    let s = table.sequences.len();
+    // Not upstream; see `twin`.
+    let twin = param.twin;
+    let s = twin.table_len(table);
     let mut len_eff = len;
+
+    let twin_best_in_table = twin.best_in_table(table.sequences.first().copied());
+    // table index of the first representative the twin did not see
+    let twin_from = table.sequences.partition_point(|&r| r < twin.below);
+    let best_hit_is_capped = crate::twin::best_hit_is_capped(options);
+    // only for a sequence with a hit: `cluster_one` needs the words of one that has none
+    let nothing_new = seq.identity > 0.0
+        && twin.below != 0
+        && table.sequences.last().is_none_or(|&r| r < twin.below);
+    // under `-aL` a later sequence can become a representative on the words left in `buf`
+    // (upstream's early return below), so every sequence must still encode its own
+    let at_cap = best_hit_is_capped && options.long_coverage == 0.0 && seq.identity >= 1.0;
+    if nothing_new || at_cap {
+        return twin_best_in_table as i32;
+    }
 
     if s != 0 {
         let mut min = db[table.sequences[s - 1]].size;
@@ -5499,6 +6137,7 @@ pub fn check_one_aa(
                 look_counts,
                 index_mapping,
                 param.required_aan,
+                twin_from as i32,
             );
         } else {
             table.count_words(
@@ -5511,6 +6150,49 @@ pub fn check_one_aa(
                 param.required_aan,
             );
         }
+    }
+
+    if crate::window::covers(options) {
+        let n = buf.look_counts.size;
+        let items = std::mem::take(&mut buf.look_counts.items);
+        for ic in &items[..n] {
+            buf.index_mapping[ic.index as usize] = 0;
+        }
+        let job = BestCandidateAa {
+            items: &items[..n],
+            seq_data: &seq.data,
+            seq_index: seq.index,
+            len,
+            entry_identity: seq.identity,
+            db,
+            table,
+            param,
+            g,
+            keep_ties: twin_best_in_table,
+            use_cache: len_eff == len,
+        };
+        let best = job.judge(buf);
+        buf.look_counts.items = items;
+        buf.look_counts.size = 0;
+        if let Some(hit) = best {
+            // Equal only under `keep_ties`: the tie goes to the newcomer if the real order
+            // reaches it before the inherited best (see `twin`). That order is by first
+            // shared word, then table index, and the inherited best has the lower index.
+            let newcomer_first = || {
+                let first_word =
+                    |index| table.first_word_with(index, aan_no, &buf.word_encodes, &buf.word_encodes_no);
+                let inherited = table.sequences.partition_point(|&r| r < twin.best_rep) as i32;
+                first_word(buf.look_counts.items[hit.pos].index) < first_word(inherited)
+            };
+            if hit.identity > seq.identity || newcomer_first() {
+                flag = 1;
+                seq.identity = hit.identity;
+                seq.cluster_id = hit.cluster_id;
+                seq.distance = hit.distance;
+                seq.coverage = hit.coverage;
+            }
+        }
+        return flag | twin_best_in_table as i32;
     }
 
     // contained_in_old_lib()
@@ -5598,7 +6280,18 @@ pub fn check_one_aa(
         } else {
             len + len2 - 2
         };
-        diag_test_aapn(
+        // Not upstream; see `pair_cache`. Its floors assume `len_eff == len`.
+        let cache = g.pair_cache.filter(|_| len_eff == len);
+        if let Some(pc) = cache {
+            if pc.is_hopeless(seq.index, db[rep_idx].index) {
+                ic_pos += 1;
+                continue;
+            }
+        }
+        cached_diag_test(
+            cache,
+            seq.index,
+            db[rep_idx].index,
             g.naa.naa1(),
             &db[rep_idx].data,
             len,
@@ -5606,9 +6299,7 @@ pub fn check_one_aa(
             buf,
             &mut best_sum,
             band_width1,
-            &mut band_left,
-            &mut band_center,
-            &mut band_right,
+            (&mut band_left, &mut band_center, &mut band_right),
             param.required_aa1,
             options,
         );
@@ -5740,7 +6431,7 @@ pub fn check_one_est(
     let options = g.options;
     let len = seq.size;
     let mut flag = 0;
-    let s = table.sequences.len();
+    let s = param.twin.table_len(table);
     let mut len_eff = len;
     if s != 0 {
         let mut min = db[table.sequences[s - 1]].size;
@@ -5856,6 +6547,11 @@ pub fn check_one_est(
                 continue;
             }
             let rep_idx = table.sequences[ic.index as usize];
+            // Not upstream; see `window`.
+            if rep_idx >= param.twin.before {
+                ic_pos += 1;
+                continue;
+            }
 
             let len2 = db[rep_idx].size;
             if len2 > len_upper_bound {
@@ -6042,7 +6738,7 @@ pub fn check_one_est(
 
 /// A `&mut [Sequence]` that hands out one element at a time to whichever worker claims
 /// its index, used by the parallel screening phase of `do_clustering`.
-struct SeqCells<'a> {
+pub(crate) struct SeqCells<'a> {
     ptr: *mut Sequence,
     len: usize,
     _marker: std::marker::PhantomData<&'a mut [Sequence]>,
@@ -6054,7 +6750,7 @@ unsafe impl Send for SeqCells<'_> {}
 unsafe impl Sync for SeqCells<'_> {}
 
 impl<'a> SeqCells<'a> {
-    fn new(slice: &'a mut [Sequence]) -> SeqCells<'a> {
+    pub(crate) fn new(slice: &'a mut [Sequence]) -> SeqCells<'a> {
         SeqCells {
             ptr: slice.as_mut_ptr(),
             len: slice.len(),
@@ -6066,7 +6762,7 @@ impl<'a> SeqCells<'a> {
     /// The caller must guarantee that `i < self.len` and that no other live borrow of
     /// element `i` exists. The atomic cursor in `screen_against_table` provides this: each
     /// index is returned by `fetch_add` exactly once.
-    unsafe fn get(&self, i: usize) -> &'a mut Sequence {
+    pub(crate) unsafe fn get(&self, i: usize) -> &'a mut Sequence {
         debug_assert!(i < self.len);
         &mut *self.ptr.add(i)
     }
@@ -6275,6 +6971,10 @@ impl SequenceDB {
     /// representatives, and writes only to the sequence it was handed. The result is
     /// therefore identical no matter how the range is distributed, which is what makes the
     /// parallel path reproduce the single-threaded output exactly.
+    ///
+    /// `twin_skips[j - from]` is sequence `j`'s [`crate::twin::TwinSkip`], or `None` to
+    /// leave `j` alone; an empty slice screens everything in full.
+    #[allow(clippy::too_many_arguments)]
     fn screen_against_table(
         &mut self,
         from: usize,
@@ -6284,15 +6984,19 @@ impl SequenceDB {
         buffers: &mut [WorkingBuffer],
         g: Globals,
         threads: usize,
+        twin_skips: &[Option<crate::twin::TwinSkip>],
     ) {
         if from >= to {
             return;
         }
+        let twin_skip = |k: usize| twin_skips.get(k).copied().unwrap_or(Some(Default::default()));
         if threads <= 1 {
             for j in from..to {
                 if self.sequences[j].state & IS_REDUNDANT != 0 {
                     continue;
                 }
+                let Some(skip) = twin_skip(j - from) else { continue };
+                params[0].twin = skip;
                 let mut seq = std::mem::take(&mut self.sequences[j]);
                 check_one(
                     &mut seq,
@@ -6304,6 +7008,7 @@ impl SequenceDB {
                 );
                 self.sequences[j] = seq;
             }
+            params[0].twin = Default::default();
             return;
         }
 
@@ -6328,7 +7033,10 @@ impl SequenceDB {
                     if seq.state & IS_REDUNDANT != 0 {
                         continue;
                     }
+                    let Some(skip) = twin_skip(k) else { continue };
+                    param.twin = skip;
                     check_one(seq, head, table, param, buf, g);
+                    param.twin = Default::default();
                 });
             }
         });
@@ -6351,6 +7059,19 @@ impl SequenceDB {
         mat: &ScoreMatrix,
         naa_tab: &Naa,
         comp_aan_idx: &[i32],
+    ) {
+        self.do_clustering_cached(options, mat, naa_tab, comp_aan_idx, None);
+    }
+
+    /// [`Self::do_clustering`] consulting and updating a cross-run [`crate::pair_cache`].
+    /// Not upstream; with `pair_cache: None` it is `do_clustering` exactly.
+    pub fn do_clustering_cached(
+        &mut self,
+        options: &Options,
+        mat: &ScoreMatrix,
+        naa_tab: &Naa,
+        comp_aan_idx: &[i32],
+        pair_cache: Option<&crate::pair_cache::RoundCache<'_>>,
     ) {
         let naa = options.naa;
         let mut aa1_cutoff = options.cluster_thd;
@@ -6433,7 +7154,17 @@ impl SequenceDB {
             mat,
             naa: naa_tab,
             comp_aan_idx,
+            pair_cache,
         };
+        let mut windows = crate::window::worthwhile(options, t).then(|| {
+            // every thread needs its scratch from the first block on
+            while buffers.len() < t {
+                params.push(WorkingParam::new(aa1_cutoff, aas_cutoff, aan_cutoff));
+                buffers.push(WorkingBuffer::new(frag_no as usize, self.max_len, self.max_len, options));
+            }
+            (crate::fanout::Fanout::new(t - 1), WordTable::new(options.naa, self.naan))
+        });
+        let twins = crate::twin::find_twins(&self.sequences, options);
 
         let mut i = 0usize;
         while i < n {
@@ -6508,15 +7239,37 @@ impl SequenceDB {
             }
             cdhit_println!("\rcomparing sequences from  {:9}  to  {:9}", i, m);
             let _ = std::io::stdout().flush();
+            let block_start = i;
+            let serial_from = match &mut windows {
+                // Not upstream; see `window`.
+                Some((helpers, window_table)) => {
+                    let mut block = crate::window::Block {
+                        table: &mut word_table,
+                        window_table,
+                        params: &mut params,
+                        buffers: &mut buffers,
+                        g,
+                        twins: &twins,
+                        start: block_start,
+                        max_items,
+                        max_seqs,
+                        helpers,
+                    };
+                    i = self.cluster_block_in_windows(&mut block, i, m);
+                    m
+                }
+                None => i,
+            };
             // `i` is upstream's outer cursor, seeded into `ks` once and then advanced so
             // the code after the loop knows where the block ended; the bound `m` is fixed.
             #[allow(clippy::mut_range_bound)]
-            for ks in i..m {
+            for ks in serial_from..m {
                 // clustering this block
                 i = ks + 1;
                 if self.sequences[ks].state & IS_REDUNDANT != 0 {
                     continue;
                 }
+                params[0].twin = self.twin_skip(&twins, block_start, ks, ks).unwrap_or_default();
                 self.cluster_one(
                     ks as i32,
                     &mut word_table,
@@ -6524,6 +7277,7 @@ impl SequenceDB {
                     &mut buffers[0],
                     g,
                 );
+                params[0].twin = Default::default();
                 if word_table.size >= max_items {
                     break;
                 }
@@ -6538,6 +7292,13 @@ impl SequenceDB {
                 }
             } // finishing word table from this block
             m = i;
+            // before the empty-table exit: twins of this block's sequences must inherit
+            // whether or not the block left anything to screen against
+            let twin_skips: Vec<Option<crate::twin::TwinSkip>> = if twins.is_empty() {
+                Vec::new()
+            } else {
+                (m..n).map(|j| self.twin_skip(&twins, block_start, m, j)).collect()
+            };
             if word_table.size == 0 {
                 continue;
             }
@@ -6572,7 +7333,9 @@ impl SequenceDB {
                     ));
                 }
             }
-            self.screen_against_table(m, j_end, &word_table, &mut params, &mut buffers, g, t);
+            self.screen_against_table(
+                m, j_end, &word_table, &mut params, &mut buffers, g, t, &twin_skips,
+            );
 
             if word_table.size > tabsize {
                 tabsize = word_table.size;
@@ -6664,6 +7427,7 @@ impl SequenceDB {
             mat,
             naa: naa_tab,
             comp_aan_idx,
+            pair_cache: None,
         };
 
         let mut word_table = WordTable::new(options.naa, self.naan);
@@ -7388,9 +8152,201 @@ mod tests {
         }
     }
 
+    /// The vector count (with its per-representative query filter) against the naive count, on
+    /// random pairs and bands; one `SimdDiag` is reused so stale filtered lists would show.
+    #[test]
+    fn protein_simd_diag_count_matches_naive_on_random_pairs() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let naa1 = Naa::new(MAX_UAA).naa1();
+        let mut simd = SimdDiag::default();
+        let mut x: u64 = 0x3c6e_f372_fe94_f82b;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..400 {
+            let alpha = 2 + next(20);
+            let len1 = 2 + next(500) as usize;
+            let len2 = 2 + next(500) as usize;
+            let query: Vec<u8> = (0..len1).map(|_| next(alpha) as u8).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| next(alpha) as u8).collect();
+            simd.prepare_query_aa(&query, len1 as i32, naa1);
+            let nall = (len1 + len2 - 1) as i32;
+            let band_b = next(nall as u64 / 2 + 1) as i32;
+            let band_e = nall - band_b;
+            assert!(simd_diag_count_aa(&mut simd, naa1, &rep, len1 as i32, len2 as i32, band_b, band_e));
+            let diag: Vec<u64> = (0..(band_e - band_b + 1) as usize)
+                .map(|i| simd.cnt[i] as u64 | ((simd.cpx[i] as u64) << 32))
+                .collect();
+            assert_eq!(diag, scalar_aa_diag_counts(naa1, &query, &rep, band_b, band_e), "len1={len1} len2={len2}");
+        }
+    }
+
+    /// The branch-light scalar scatter in `diag_test_aapn`, against the naive count. Queries
+    /// of varying length reuse one buffer, so stale `aap_list` tails are exercised too.
+    #[test]
+    fn protein_scalar_diag_count_matches_naive_on_random_pairs() {
+        if simd_diag_supported() {
+            return; // diag_test_aapn takes the vector path; the scalar one is unreachable
+        }
+        let naa = Naa::new(MAX_UAA);
+        let naa1 = naa.naa1();
+        let options = Options::default();
+        let mut buf = WorkingBuffer::new(10, 800, 1600, &options);
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..400 {
+            // small alphabets make 2-mers repeat, covering the `count > 2` loop
+            let alpha = 2 + next(20);
+            let len1 = 1 + next(700) as usize;
+            let len2 = 2 + next(700) as usize;
+            let query: Vec<u8> = (0..len1).map(|_| next(alpha) as u8).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| next(alpha) as u8).collect();
+            buf.compute_aap(&query, len1 as i32, &naa);
+            let required_aa1 = next(40) as i32;
+            let (mut best_sum, mut left, mut center, mut right) = (0, 0, 0, 0);
+            diag_test_aapn(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut best_sum, 20,
+                &mut left, &mut center, &mut right, required_aa1, &options,
+            );
+            let nall = (len1 + len2 - 1) as i32;
+            let band_b = (required_aa1 - 1).max(0);
+            let band_e = nall - band_b;
+            if band_b > band_e {
+                continue;
+            }
+            assert_eq!(
+                buf.diag_score[band_b as usize..=band_e as usize],
+                scalar_aa_diag_counts(naa1, &query, &rep, band_b, band_e)[..],
+                "len1={len1} len2={len2} band=[{band_b},{band_e}]"
+            );
+        }
+    }
+
+    /// `diag_test_aapn_wide` must leave the test's outputs as `diag_test_aapn` does, and its
+    /// window maximum must be that of the naive counts over the wide range.
+    #[test]
+    fn wide_diag_test_matches_plain_and_naive_window() {
+        let naa = Naa::new(MAX_UAA);
+        let naa1 = naa.naa1();
+        let options = Options::default();
+        let mut buf = WorkingBuffer::new(10, 800, 1600, &options);
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..400 {
+            let alpha = 2 + next(20);
+            let len1 = 2 + next(600) as usize;
+            let len2 = len1 + next(200) as usize;
+            let query: Vec<u8> = (0..len1).map(|_| next(alpha) as u8).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| next(alpha) as u8).collect();
+            let nall = (len1 + len2 - 1) as i32;
+            let required_aa1 = next(len1 as u64 / 2 + 1) as i32;
+            let band_b = (required_aa1 - 1).max(0);
+            let lo = (band_b - next(band_b as u64 + 1) as i32 - 1).max(0);
+            let bw = 20.min(nall - 1);
+            buf.compute_aap(&query, len1 as i32, &naa);
+            let mut plain = (0, 0, 0, 0);
+            diag_test_aapn(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut plain.0, bw, &mut plain.1, &mut plain.2,
+                &mut plain.3, required_aa1, &options,
+            );
+            let mut wide = (0, 0, 0, 0);
+            let most = diag_test_aapn_wide(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut wide.0, bw, &mut wide.1, &mut wide.2,
+                &mut wide.3, required_aa1, &options, (lo, nall - lo), i32::MAX,
+            );
+            assert_eq!(plain, wide, "len1={len1} len2={len2} req={required_aa1} lo={lo}");
+            let naive = scalar_aa_diag_counts(naa1, &query, &rep, lo, nall - lo);
+            let full: Vec<u64> = (0..=nall).map(|d| if d >= lo && d <= nall - lo { naive[(d - lo) as usize] } else { 0 }).collect();
+            let exact = max_window_count(&full, lo, nall - lo, bw);
+            assert_eq!(most, exact, "len1={len1} len2={len2} lo={lo}");
+            let enough = next(exact as u64 * 2 + 2) as i32;
+            let mut bounded = (0, 0, 0, 0);
+            let got = diag_test_aapn_wide(
+                naa1, &rep, len1 as i32, len2 as i32, &mut buf, &mut bounded.0, bw, &mut bounded.1, &mut bounded.2,
+                &mut bounded.3, required_aa1, &options, (lo, nall - lo), enough,
+            );
+            assert_eq!(plain, bounded, "enough={enough}");
+            assert!(if exact < enough { got == exact } else { got >= enough }, "enough={enough}: {got} vs {exact}");
+        }
+    }
+
+    /// `count_words_direct` through `dense_words` must list exactly what the posting walk
+    /// lists, in its order, with its counts, and leave `index_mapping` the same.
+    #[test]
+    fn dense_word_counts_match_the_posting_walk() {
+        if !simd_diag_supported() {
+            return;
+        }
+        let mut x: u64 = 0xbb67_ae85_84ca_a73b;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        // sorted word codes with run multiplicities on the first slot, as `encode_words` makes
+        let words_of = |len: usize, alpha: u64, next: &mut dyn FnMut(u64) -> u64| {
+            let seq: Vec<i32> = (0..len).map(|_| next(alpha) as i32).collect();
+            let mut we: Vec<i32> = seq.windows(2).map(|w| w[0] * 21 + w[1]).collect();
+            we.sort_unstable();
+            let mut wen = vec![1u32; we.len()];
+            for j in (1..we.len()).rev() {
+                if we[j] == we[j - 1] {
+                    wen[j - 1] += wen[j];
+                    wen[j] = 0;
+                }
+            }
+            (we, wen)
+        };
+        for round in 0..30 {
+            let mut dense = WordTable::new(2, 441);
+            let mut walk = WordTable::new(2, 441);
+            let n = 1 + next(300) as usize;
+            for idx in 0..n {
+                let alpha = if round % 5 == 0 { 2 + next(4) } else { 21 };
+                let (we, wen) = words_of(3 + next(400) as usize, alpha, &mut next);
+                dense.add_word_counts(we.len() as i32, &we, &wen, idx as i32, false);
+                walk.add_word_counts(we.len() as i32, &we, &wen, idx as i32, false);
+            }
+            assert!(dense.dense.is_live());
+            walk.dense.reset(0);
+            let mut lc = (LookCounts { items: vec![IndexCount::default(); n + 2], size: 0 }, vec![0u32; n + 2]);
+            let mut lw = (LookCounts { items: vec![IndexCount::default(); n + 2], size: 0 }, vec![0u32; n + 2]);
+            for _ in 0..40 {
+                // a 1-letter alphabet over 600 residues pushes a word past the 255 byte limit
+                let (len, alpha) = if next(10) == 0 { (600, 1) } else { (3 + next(400) as usize, 2 + next(20)) };
+                let (we, wen) = words_of(len, alpha, &mut next);
+                let aan_no = we.len() as i32;
+                let min = next(aan_no as u64 + 2) as i32 - 1;
+                let from = next(n as u64) as i32 - (n as i32) / 4;
+                dense.count_words_direct(aan_no, &we, &wen, &mut lc.0, &mut lc.1, min, from);
+                walk.count_words_direct(aan_no, &we, &wen, &mut lw.0, &mut lw.1, min, from);
+                // the terminator's `index` is stale scratch; callers stop at its zero count
+                assert_eq!(lc.0.items[..lc.0.size], lw.0.items[..lw.0.size], "n={n} len={len} min={min} from={from}");
+                assert_eq!((lc.0.items[lc.0.size].count, lw.0.items[lw.0.size].count), (0, 0));
+                assert_eq!(lc.1, lw.1, "index_mapping, n={n} len={len} min={min} from={from}");
+            }
+        }
+    }
+
     #[test]
     fn nucleotide_simd_diag_count_matches_scalar_counts() {
-        if !simd_diag_supported() {
+        if !simd_diag_nt_supported() {
             return;
         }
         let query = [0, 1, 2, 3, 0, 1, 2, 4, 0, 1, 2, 3, 3, 2, 1, 0];
@@ -7412,6 +8368,47 @@ mod tests {
                 .map(|i| simd.cnt[i] as u64 | ((simd.cpx[i] as u64) << 32))
                 .collect();
             assert_eq!(diag, scalar_nt_diag_counts(&query, &rep, band_b, band_e));
+        }
+    }
+
+    /// Long random pairs: queries past 255 positions per weight group (the 8-bit flush),
+    /// spans over several 256-diagonal chunks, `N`s, and `TTTT` runs (the 0xFF sentinel).
+    #[test]
+    fn nucleotide_simd_diag_count_matches_scalar_on_random_long_pairs() {
+        if !simd_diag_nt_supported() {
+            return;
+        }
+        let mut x: u64 = 0x853c49e6748fea9b;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        let mut simd = SimdDiag::default();
+        for i in 0..150 {
+            let len1 = 4 + next(2500) as usize;
+            let len2 = 4 + next(2500) as usize;
+            // every third pair is T-rich, to hit TTTT often; N appears about 1% of the time
+            let mut base = |rich: bool| -> u8 {
+                if next(100) == 0 { 4 } else if rich && next(2) == 0 { 3 } else { next(4) as u8 }
+            };
+            let query: Vec<u8> = (0..len1).map(|_| base(i % 3 == 0)).collect();
+            let rep: Vec<u8> = (0..len2).map(|_| base(i % 3 == 0)).collect();
+            simd.prepare_query(&query, len1 as i32);
+            let nall = (len1 + len2 - 1) as i32;
+            let band_b = next((nall / 3) as u64) as i32;
+            let band_e = nall - band_b;
+            assert!(simd_diag_count(&mut simd, &rep, len1 as i32, len2 as i32, band_b, band_e));
+            let span = (band_e - band_b + 1) as usize;
+            let diag: Vec<u64> = (0..span)
+                .map(|k| simd.cnt[k] as u64 | ((simd.cpx[k] as u64) << 32))
+                .collect();
+            assert_eq!(
+                diag,
+                scalar_nt_diag_counts(&query, &rep, band_b, band_e),
+                "len1={len1} len2={len2} band=[{band_b},{band_e}]"
+            );
         }
     }
 }
